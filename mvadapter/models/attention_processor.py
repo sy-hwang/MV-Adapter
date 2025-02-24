@@ -9,7 +9,9 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-
+from mvadapter.models.attention_util import scaled_dot_product_attention, compute_attention_rollout
+import matplotlib.pyplot as plt
+import numpy as np
 
 def default_set_attn_proc_func(
     name: str,
@@ -111,6 +113,7 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.name = name  # NOTE: need for image cross-attention
         self.use_mv = use_mv
         self.use_ref = use_ref
+        self.t = 0
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
