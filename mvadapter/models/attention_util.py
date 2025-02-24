@@ -1,16 +1,19 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-def scaled_dot_product_attention(q, k, v, mask=None):
+def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
     """
     Scaled Dot-Product Attention을 직접 구현하여 어텐션 가중치를 반환하는 함수
     
     Args:
-        q (Tensor): Query 행렬 (Batch, Heads, Query Length, Dim)
-        k (Tensor): Key 행렬 (Batch, Heads, Key Length, Dim)
-        v (Tensor): Value 행렬 (Batch, Heads, Key Length, Dim)
-        mask (Tensor, optional): 어텐션 마스크 (Broadcast 가능 형태)
+        query: [batch_size, num_heads, seq_len, d_k] 형태의 쿼리 행렬
+        key: [batch_size, num_heads, seq_len, d_k] 형태의 키 행렬
+        value: [batch_size, num_heads, seq_len, d_v] 형태의 값 행렬
+        dropout_p: 드롭아웃 확률
+        is_causal: 트라이앵글 마스킹 적용 여부 (미래 정보 차단)
         
     Returns:
         output (Tensor): 어텐션이 적용된 값 (Batch, Heads, Query Length, Dim)
@@ -23,51 +26,90 @@ def scaled_dot_product_attention(q, k, v, mask=None):
     attn_logits = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(d_k, dtype=q.dtype))
 
     # 마스크가 있을 경우 적용 (예: 패딩 마스크 또는 캐주얼 마스크)
-    if mask is not None:
-        attn_logits = attn_logits.masked_fill(mask == 0, float('-inf'))
-
+    if is_causal:
+        seq_len = q.shape[-2]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).to(q.device)  # Upper triangular matrix
+        attn_logits = attn_logits.masked_fill(causal_mask == 1, float('-inf'))  # 미래 정보를 가려줌
+    
     # Softmax를 적용하여 확률값으로 변환 (어텐션 가중치 계산)
     attention_weights = F.softmax(attn_logits, dim=-1)
 
-    # 어텐션 가중치와 Value 행렬을 곱하여 최종 출력 계산
-    output = torch.matmul(attention_weights, v)
+    if dropout_p > 0.0:
+        attention_weights = F.dropout(attention_weights, p=dropout_p)
 
-    return output, attention_weights
+    return attention_weights
 
-def compute_attention_rollout(attn_maps):
+def visualize_patch_attention(cross_attn_weights, filename, head_fusion="mean"):
     """
-    Attention Rollout을 계산하는 함수.
-
-    Args:
-        attn_maps (List[np.ndarray] 또는 List[torch.Tensor]): 
-            - shape: (num_layers, 48, 48) 형태의 attention maps 리스트
-            - self.full_attention_maps을 입력으로 받음
-
-    Returns:
-        torch.Tensor: Attention Rollout 결과 (48x48)
+    cross_attn_weights: 여러 레이어에서 수집한 attention weight 리스트.
+                         각 원소의 shape는 (B, Heads, Query Length)
+    filename: 저장할 파일 이름 (확장자는 자동으로 ".png"가 붙음)
+    head_fusion: 융합 방식 ("mean" 또는 "max")
+    
+    주의: 각 레이어마다 query length가 다를 수 있으므로,
+         모든 레이어 중 최대 query length를 기준으로 리사이징한 후 rollout 적용합니다.
+         (불필요한 변수 할당 없이 in-place 연산 위주로 구현)
     """
+    import numpy as np
+    from PIL import Image
+    import math
+    import matplotlib.cm as cm
 
-    # 리스트가 비어있는 경우 예외 처리
-    if len(attn_maps) == 0:
-        raise ValueError("Error: Attention maps list is empty!")
+    # 배치 크기와 최대 query length 결정 (최소한의 변수만 사용)
+    first = cross_attn_weights[0]
+    if hasattr(first, 'detach'):
+        first = first.detach().cpu().numpy()
+    B = first.shape[0]
+    max_query_length = 0
+    for attn in cross_attn_weights:
+        if hasattr(attn, 'detach'):
+            attn = attn.detach().cpu().numpy()
+        cur_len = attn.shape[-1]
+        if cur_len > max_query_length:
+            max_query_length = cur_len
+    max_side = int(math.sqrt(max_query_length))
+    if max_side * max_side != max_query_length:
+        raise ValueError("최대 query length (L={})가 정사각형 형태가 아닙니다.".format(max_query_length))
+    
+    # rollout 초기화 (배치별, 최대 query length)
+    rollout = np.ones((B, max_query_length), dtype=np.float32)
 
-    # NumPy 배열이 들어온 경우 PyTorch Tensor로 변환
-    if isinstance(attn_maps[0], np.ndarray):
-        attn_maps = [torch.tensor(a, dtype=torch.float32) for a in attn_maps]
+    # 각 레이어 처리: head fusion 후 바로 rollout에 반영
+    for attn in cross_attn_weights:
+        if hasattr(attn, 'detach'):
+            attn = attn.detach().cpu().numpy()
+        # head fusion (B, Query Length)
+        if head_fusion == "mean":
+            fused = np.mean(attn, axis=1)
+        elif head_fusion == "max":
+            fused = np.max(attn, axis=1)
+        elif head_fusion == "min":
+            fused = np.min(attn, axis=1)
+        else:
+            raise ValueError("Unsupported head fusion method: {}".format(head_fusion))
+        current_query_length = fused.shape[1]
+        current_side = int(math.sqrt(current_query_length))
+        if current_side * current_side != current_query_length:
+            raise ValueError("어떤 레이어의 query length (L={})가 정사각형 형태가 아닙니다.".format(current_query_length))
+        
+        # 크기가 다르면 배치별로 개별 resize 후 rollout에 곱셈 반영
+        if current_query_length != max_query_length:
+            for i in range(B):
+                cur_map = fused[i].reshape(current_side, current_side)
+                im = Image.fromarray(cur_map.astype(np.float32), mode='F')
+                resized_im = im.resize((max_side, max_side), resample=Image.BILINEAR)
+                rollout[i] *= np.array(resized_im).flatten()
+        else:
+            rollout *= fused  # 크기가 같으면 바로 곱셈
 
-    # (num_layers, 48, 48) 형태로 변환
-    attn_maps = torch.stack(attn_maps)  # (L, 48, 48)
-
-    # Identity Matrix 추가 (Skip Connection 효과)
-    identity = torch.eye(48, dtype=attn_maps.dtype, device=attn_maps.device)  # (48, 48)
-
-    # Attention 정규화 (각 행의 합이 1이 되도록)
-    attn_maps = attn_maps + identity
-    attn_maps /= attn_maps.sum(dim=-1, keepdim=True)  # Row-wise normalize
-
-    # Attention Rollout: 모든 레이어를 행렬 곱으로 누적
-    attn_rollout = attn_maps[0]  # 첫 번째 레이어 초기값
-    for i in range(1, attn_maps.shape[0]):
-        attn_rollout = torch.matmul(attn_rollout, attn_maps[i])  # (48, 48)
-
-    return attn_rollout
+    # 최종 rollout 결과를 배치별로 정규화하여 하나의 이미지에 좌우로 붙임
+    colormap = cm.get_cmap('jet')
+    final_img = Image.new("RGB", (B * max_side, max_side))
+    for i in range(B):
+        attn_map = rollout[i].reshape(max_side, max_side)
+        attn_map = attn_map/np.max(attn_map)
+        colored = (colormap(attn_map)[..., :3] * 255).astype(np.uint8)
+        heatmap_img = Image.fromarray(colored, mode="RGB")
+        final_img.paste(heatmap_img, (i * max_side, 0))
+    
+    final_img.save(filename + "rgb.png")

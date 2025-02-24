@@ -9,7 +9,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-from mvadapter.models.attention_util import scaled_dot_product_attention, compute_attention_rollout
+from mvadapter.models.attention_util import get_attention_weight, visualize_patch_attention
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -114,6 +114,7 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.use_mv = use_mv
         self.use_ref = use_ref
         self.t = 0
+        self.cross_attn_weights = []
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
@@ -339,9 +340,17 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 1, 2
             )
 
+            selected_patch = 288
             hidden_states_ref = F.scaled_dot_product_attention(
                 query_ref, key_ref, value_ref, dropout_p=0.0, is_causal=False
             )
+            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref)[batch_size//2:, :, :, selected_patch].detach().cpu().numpy()
+            print(f"{self.name} weights: {cross_attn_weight.shape}") #cross_attn_weight: (Batch, Heads, Query Length)
+            self.cross_attn_weights.append(cross_attn_weight)
+            if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
+                visualize_patch_attention(self.cross_attn_weights, filename=f"attn_maps/{selected_patch}-{self.t}", head_fusion="min")
+                self.t += 1
+                self.cross_attn_weights.clear()
 
             hidden_states_ref = hidden_states_ref.transpose(1, 2).reshape(
                 batch_size, -1, attn.heads * head_dim

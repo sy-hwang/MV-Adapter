@@ -9,4 +9,4 @@ python -m scripts.inference_i2mv_sdxl \
 --seed 21 \
 --num_views $NUMVIEW \
 --device "cuda:0" \
---output out_${FILE}_$NUMVIEW.png
+--output $FILE-$NUMVIEW.png
