@@ -128,16 +128,20 @@ def run_pipeline(
     negative_prompt="watermark, ugly, deformed, noisy, blurry, low contrast",
     lora_scale=1.0,
     device="cuda",
+    azimuth_deg=None,
 ):
+    
     # Prepare cameras
+    if azimuth_deg is None:
+        azimuth_deg = [0, 45, 90, 180, 270, 315]
     cameras = get_orthogonal_camera(
-        elevation_deg=[0, 0, 0, 0, 0, 0],
+        elevation_deg=[0] * num_views,
         distance=[1.8] * num_views,
         left=-0.55,
         right=0.55,
         bottom=-0.55,
         top=0.55,
-        azimuth_deg=[x - 90 for x in [0, 45, 90, 180, 270, 315]],
+        azimuth_deg=[x - 90 for x in azimuth_deg],
         device=device,
     )
 
@@ -209,6 +213,8 @@ if __name__ == "__main__":
     parser.add_argument("--remove_bg", action="store_true", help="Remove background")
     args = parser.parse_args()
 
+    azimuth_deg= [i*(360/args.num_views) for i in range(args.num_views)]
+
     pipe = prepare_pipeline(
         base_model=args.base_model,
         vae_model=args.vae_model,
@@ -252,6 +258,7 @@ if __name__ == "__main__":
         negative_prompt=args.negative_prompt,
         device=args.device,
         remove_bg_fn=remove_bg_fn,
+        azimuth_deg=azimuth_deg,
     )
     make_image_grid(images, rows=1).save(args.output)
     reference_image.save(args.output.rsplit(".", 1)[0] + "_reference.png")

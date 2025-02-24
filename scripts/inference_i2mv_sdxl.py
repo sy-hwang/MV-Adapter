@@ -162,6 +162,7 @@ def run_pipeline(
     if seed != -1 and isinstance(seed, int):
         pipe_kwargs["generator"] = torch.Generator(device=device).manual_seed(seed)
 
+
     images = pipe(
         text,
         height=height,
@@ -176,9 +177,54 @@ def run_pipeline(
         negative_prompt=negative_prompt,
         cross_attention_kwargs={"scale": lora_scale},
         **pipe_kwargs,
+        # callback_on_step_end=my_custom_callback,
+        # callback_on_step_end_tensor_inputs=["latents"],
     ).images
 
     return images, reference_image
+
+import os
+def my_custom_callback(pipeline, step, timestep, callback_kwargs):
+    """매 타임스텝마다 실행되는 사용자 정의 callback 함수"""
+    print(f"Step {step}: Timestep {timestep}")
+
+    latent = callback_kwargs.get("latents", None)
+    if latent is None:
+        return callback_kwargs
+    
+    pred_x0 = callback_kwargs.get("pred_x0", None)
+    if pred_x0 is None:
+        print("pred_x0 is None")
+        return callback_kwargs
+
+    # 이미지를 PIL 형식으로 변환
+    def save_image_tensor(latents, path):
+        latents = latents / pipeline.vae.config.scaling_factor
+        with torch.no_grad():
+            image_tensors = pipeline.vae.decode(latents.to(pipeline.device)).sample  # [B, C, H, W]
+        images = []
+        for img in image_tensors:
+            img = (img / 2 + 0.5).clamp(0, 1)  # Normalize to [0, 1]
+            img = (img * 255).byte().permute(1, 2, 0).cpu().numpy()  # [H, W, C]로 변환
+            img_pil = Image.fromarray(img)
+            images.append(img_pil)
+        
+        # 여러 개의 이미지가 있으면 그리드로 저장
+        os.makedirs(path, exist_ok=True)
+        if len(images) > 1:
+            image_grid = make_image_grid(images, rows=1)  # 기존 코드와 동일한 방식
+            img_path = os.path.join(path, f"{step}.png")
+            image_grid.save(img_path)
+        else:
+            img_path = os.path.join(path, f"{step}.png")
+            images[0].save(img_path)
+    
+    SAVE_DIR = "out_0"
+
+    save_image_tensor(latent, f"{SAVE_DIR}_xt")
+    save_image_tensor(pred_x0, f"{SAVE_DIR}_x0")
+
+    return callback_kwargs
 
 
 if __name__ == "__main__":
@@ -197,10 +243,10 @@ if __name__ == "__main__":
     # Device
     parser.add_argument("--device", type=str, default="cuda")
     # Inference
-    parser.add_argument("--num_views", type=int, default=6)  # not used
-    parser.add_argument(
-        "--azimuth_deg", type=int, nargs="+", default=[0, 45, 90, 180, 270, 315]
-    )
+    parser.add_argument("--num_views", type=int, default=6)  # used
+    # parser.add_argument(
+    #     "--azimuth_deg", type=int, nargs="+", default=[0, 45, 90, 180, 270, 315]
+    # ) #Not used
     parser.add_argument("--image", type=str, required=True)
     parser.add_argument("--text", type=str, default="high quality")
     parser.add_argument("--num_inference_steps", type=int, default=50)
@@ -218,7 +264,9 @@ if __name__ == "__main__":
     parser.add_argument("--remove_bg", action="store_true", help="Remove background")
     args = parser.parse_args()
 
-    num_views = len(args.azimuth_deg)
+    #num_views = len(args.azimuth_deg)
+    num_views = args.num_views
+    azimuth_deg= [i*(360/num_views) for i in range(num_views)]
 
     pipe = prepare_pipeline(
         base_model=args.base_model,
@@ -263,7 +311,7 @@ if __name__ == "__main__":
         negative_prompt=args.negative_prompt,
         device=args.device,
         remove_bg_fn=remove_bg_fn,
-        azimuth_deg=args.azimuth_deg,
+        azimuth_deg=azimuth_deg,
     )
     make_image_grid(images, rows=1).save(args.output)
     reference_image.save(args.output.rsplit(".", 1)[0] + "_reference.png")
