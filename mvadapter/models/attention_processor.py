@@ -9,7 +9,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-from mvadapter.models.attention_util import get_attention_weight, downsample_patch, fuse_heads, rollout, show_mask_on_image
+from mvadapter.models.attention_util import get_attention_weight, rollout_cross_attention_map_1, rollout_cross_attention_map_2, show_mask_on_image
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -116,7 +116,8 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.t = 0
         #self.cross_attn_weights = []
         #self.mv_attn_weights = []
-        self.cross_attn_rollout=None
+        self.cross_attn_rollout_1=None
+        self.cross_attn_rollout_2=None
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
@@ -328,6 +329,11 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             # dropout
             hidden_states_mv = self.to_out_mv[1](hidden_states_mv)
 
+            #selected_self_batch = 0 ###################################################################################<--------------change the image here
+            #selected_self_patch = 179
+            #self_attn_weight = get_attention_weight(query_mv, key_mv, value_mv) # (Batch x View x ih, Head, iw, View*iw) [384, 10, 48, 192] or [192, 20, 24, 96]
+            #print(f"name: {self.name}, self_attn_weight: {self_attn_weight.shape}")
+
 
         if use_ref:
             reference_hidden_states = ref_hidden_states[self.name]
@@ -343,26 +349,39 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 1, 2
             )
 
-            selected_patch = 179   ###################################################################################<--------------change the patch here
             hidden_states_ref = F.scaled_dot_product_attention(
                 query_ref, key_ref, value_ref, dropout_p=0.0, is_causal=False
             )
-            
-            Patch_W = 24
+
             cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref)[batch_size//2:, :, :, :].detach().cpu() #(B, H, Q, K)
-            cross_attn_weight = fuse_heads(cross_attn_weight, head_fusion="mean") #(B, H, Q, K) -> (B, Q, K)
-            cross_attn_weight = cross_attn_weight[:, :, selected_patch] #(B, Q) NEED TO CHECK HERE. Whether to visualize query or key
-            _, Q = cross_attn_weight.shape
-            W = int(Q**0.5)
-            cross_attn_weight = rearrange(cross_attn_weight, "b (w h) -> b w h", w=W, h=W) #(B, Q) -> (B, W, H)
-            cross_attn_weight = downsample_patch(cross_attn_weight, Patch_W).to(hidden_states_ref.device) #(B, W, H) -> (B, 24, 24)
-            #print(f"3. downsample{cross_attn_weight.shape} - max: {cross_attn_weight.max()}, min: {cross_attn_weight.min()}")
-            self.cross_attn_rollout = rollout(self.cross_attn_rollout, cross_attn_weight)
+
+            ###################################################################################
+            # self.cross_attn_rollout_1 = rollout_cross_attention_map_1(cross_attn_weight, 
+            #                               head_fusion="mean", 
+            #                               selected_patch=102, 
+            #                               downsample=24, 
+            #                               prev_rollout=self.cross_attn_rollout_1,
+            #                               device=hidden_states_ref.device)
+
+            # if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
+            #     self.t += 1
+            #     show_mask_on_image(self.cross_attn_rollout_1, "assets/demo/i2mv/dino.png", f"dino_0-{self.t}", save=False)
+            #     self.cross_attn_rollout_1 = None
+#########################################################################################################################################################################
+
+            self.cross_attn_rollout_2 = rollout_cross_attention_map_2(cross_attn_weight,
+                                            head_fusion="mean",
+                                            selected_view=3,
+                                            selected_patch=102,
+                                            downsample=24,
+                                            prev_rollout=self.cross_attn_rollout_2,
+                                            device=hidden_states_ref.device
+                                        )
             if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
                 self.t += 1
-                self.t = 0 if self.t >50 else self.t
-                show_mask_on_image(self.cross_attn_rollout, "assets/demo/i2mv/dino.png", f"dino_{selected_patch}-{self.t}", save=False)
-                self.cross_attn_rollout = None
+                show_mask_on_image(self.cross_attn_rollout_2, "assets/demo/i2mv/dino.png", f"dino_1-{self.t}", save=False)
+                self.cross_attn_rollout_2 = None
+#########################################################################################################################################################################
 
             hidden_states_ref = hidden_states_ref.transpose(1, 2).reshape(
                 batch_size, -1, attn.heads * head_dim

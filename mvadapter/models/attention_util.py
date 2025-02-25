@@ -6,12 +6,14 @@ import seaborn as sns
 import cv2
 from IPython.display import clear_output, display
 from PIL import Image
+from einops import rearrange
 
 def downsample_patch(tensor, target_patch):
-    B, W, H = tensor.shape
-    tensor = tensor.unsqueeze(1) # (B, 1, W, H)
+    original_shape = tensor.shape[:-2]
+    tensor = tensor.view(-1, 1, *tensor.shape[-2:]) # (..., W, H) -> (-1, 1, W, H)
+    
     tensor = F.interpolate(tensor, size=(target_patch, target_patch), mode='bilinear', align_corners=False)
-    return tensor.squeeze(1) #(B, target, target)
+    return tensor.view(*original_shape, target_patch, target_patch)
 
     
 def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
@@ -73,16 +75,59 @@ def fuse_heads(attention_map, head_fusion="mean"):
 def rollout(prev_rollout, attention_map):
     """
     Args:
-        prev_rollout (Tensor): 이전에 rollout된 어텐션 맵 (Batch, W, H)
-        attention_map (Tensor): 현재 어텐션 맵 (Batch, W, H)
+        prev_rollout (Tensor): 이전 rollout된 어텐션 맵 (Batch, W, H) 또는 (W, H)
+        attention_map (Tensor): 현재 어텐션 맵 (Batch, W, H) 또는 (W, H)
     """
-    B, W, H = attention_map.shape
+    W, H = attention_map.shape[-2:]
+
+    identity = torch.eye(W, device=attention_map.device, dtype=attention_map.dtype).expand_as(attention_map)
+
     if prev_rollout is None:
         return attention_map
     else:
-        identity = torch.eye(W, device=attention_map.device, dtype=attention_map.dtype).expand(B, W, H)
-        return torch.bmm(attention_map+identity, prev_rollout)
+        # 2D일 경우 3D로 변환 후 연산
+        if attention_map.dim() == 2:
+            return torch.bmm((attention_map + identity).unsqueeze(0), prev_rollout.unsqueeze(0)).squeeze(0)
+        else:
+            return torch.bmm(attention_map + identity, prev_rollout)
 
+
+def rollout_cross_attention_map_1(attention_weight, head_fusion="mean", selected_patch=0, downsample=24, prev_rollout=None, device='cuda'):
+    """
+    rolling out the image cross attention map, with pure cross-attention weight.
+    reference image(key)를 기준으로 query image(mv images)의 attention map을 시각화하는 함수
+    Args:
+        attention_weight (Tensor): (B, H, Q, K)
+        head_fusion (str): 헤드 통합 방법 (mean, max, min)
+        selected_patch (int): 선택한 패치 번호 (downsample*downsample 보다 작아야 함)
+        downsample (int): 다운샘플링 크기
+    """
+    B, H, Q, K = attention_weight.shape
+    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K)
+    attention_weight = attention_weight[:, :, selected_patch] # (B, Q) NEED TO CHECK. Whether to visualize Q or K
+    W = int(Q**0.5)
+    attention_weight = rearrange(attention_weight, 'b (w h) -> b w h', w=W, h=W) #(B, Q) -> (B, W, H)
+    attention_weight = downsample_patch(attention_weight, downsample).to(device) # (B, downsample, downsample)
+    return rollout(prev_rollout, attention_weight)
+
+def rollout_cross_attention_map_2(attention_weight, head_fusion="mean", selected_view=0,selected_patch=0, downsample=24, prev_rollout=None, device='cuda'):
+    """
+    rolling out the image cross attention map, with pure cross-attention weight.
+    mv images들 중 하나(query)를 기준으로 reference image(key)의 attention map을 시각화하는 함수
+    Args:
+        attention_weight (Tensor): (B, H, Q, K)
+        head_fusion (str): 헤드 통합 방법 (mean, max, min)
+        selected_view (int): 선택한 mv image
+        selected_patch (int): 선택한 패치 번호 (downsample*downsample 보다 작아야 함)
+        downsample (int): 다운샘플링 크기
+    """
+    B, H, Q, K = attention_weight.shape
+    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K)
+    attention_weight = attention_weight[selected_view, selected_patch, :] # (K)
+    W = int(K**0.5)
+    attention_weight = rearrange(attention_weight, '(w h) -> w h', w=W, h=W) #(K) -> (W, H)
+    attention_weight = downsample_patch(attention_weight, downsample).to(device) # (downsample, downsample)
+    return rollout(prev_rollout, attention_weight)
 
 
 import numpy as np
@@ -98,11 +143,13 @@ from IPython.display import display, clear_output
 def show_mask_on_image(mask, img_path, filename="mask", save=True, need_display=True):
     """
     Args:
-        mask (Tensor): (B, W, H) 형태의 attention mask (값 범위 [0,1])
+        mask (Tensor): (B, W, H), 또는 (W, H) 형태의 attention mask (값 범위 [0,1])
         img_path (str): 원본 이미지 경로 (현재 사용되지 않음)
         filename (str): 저장할 파일명
     """
     mask = mask.detach().cpu().numpy()  # GPU → CPU 변환
+    if mask.ndim == 2:
+        mask = mask[np.newaxis, :, :]  # (W, H) → (1, W, H)
     B, W, H = mask.shape  # 배치 크기 유지
 
     # NaN 및 Inf 값 처리
