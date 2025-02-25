@@ -86,3 +86,60 @@ def make_image_grid(
     for i, img in enumerate(images):
         grid.paste(img, box=(i % cols * w, i // cols * h))
     return grid
+
+from PIL import Image, ImageDraw
+import numpy as np
+
+from PIL import Image, ImageDraw
+
+def draw_patches(image, num_patches=(24, 24), highlight_index=None,
+                                line_color=(255, 255, 255), line_width=2,
+                                highlight_color=(255, 0, 0), highlight_width=4):
+    """
+    입력 이미지를 patch 개수에 맞춰 나누고, 특정 패치를 강조하는 함수.
+
+    Args:
+        image (PIL.Image): 입력 이미지
+        num_patches (tuple): 패치 개수 (가로 개수, 세로 개수)
+        highlight_index (int): 강조할 패치의 리니어 인덱스 (0-based index)
+        line_color (tuple): 경계선 색상 (RGB, 기본: 흰색)
+        line_width (int): 경계선 두께 (기본: 2px)
+        highlight_color (tuple): 강조 패치 테두리 색상 (RGB, 기본: 빨간색)
+        highlight_width (int): 강조 패치 테두리 두께 (기본: 4px)
+
+    Returns:
+        PIL.Image: 패치 경계선을 포함한 새로운 이미지
+    """
+    img_with_patches = image.copy()
+    draw = ImageDraw.Draw(img_with_patches)
+
+    img_width, img_height = image.size
+    num_patches_w, num_patches_h = num_patches
+
+    # 패치 크기 계산
+    patch_w = img_width // num_patches_w
+    patch_h = img_height // num_patches_h
+
+    # 세로줄 그리기
+    for x in range(patch_w, img_width, patch_w):
+        draw.line([(x, 0), (x, img_height)], fill=line_color, width=line_width)
+
+    # 가로줄 그리기
+    for y in range(patch_h, img_height, patch_h):
+        draw.line([(0, y), (img_width, y)], fill=line_color, width=line_width)
+
+    # 강조할 패치 찾기
+    if highlight_index is not None:
+        total_patches = num_patches_w * num_patches_h
+        if 0 <= highlight_index < total_patches:
+            # 리니어 인덱스를 2D 인덱스로 변환
+            x_idx = highlight_index % num_patches_w  # 가로 인덱스
+            y_idx = highlight_index // num_patches_w  # 세로 인덱스
+
+            x1, y1 = x_idx * patch_w, y_idx * patch_h
+            x2, y2 = x1 + patch_w, y1 + patch_h
+
+            # 강조된 패치 테두리 (빨간색 + 굵은 선)
+            draw.rectangle([x1, y1, x2, y2], outline=highlight_color, width=highlight_width)
+
+    return img_with_patches

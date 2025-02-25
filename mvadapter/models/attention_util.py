@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import cv2
 
 def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
     """
@@ -38,6 +39,61 @@ def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
         attention_weights = F.dropout(attention_weights, p=dropout_p)
 
     return attention_weights
+
+def rollout(attentions, discard_ratio, head_fusion):
+    '''
+    attentions : (B, Head, W, H) 크기의 텐서가 Layer 수만큼 쌓인 리스트
+    discard_ratio : 어떤 비율의 어텐션 맵을 버릴지 결정
+    head_fusion : 어떤 방식으로 Head를 합칠지 결정
+    '''
+
+    B, H, W, W_ = attentions[0].shape
+    result = torch.eye(W).repeat(B, 1, 1)
+    with torch.no_grad():
+        for attention in attentions:
+            if head_fusion == "mean":
+                fused = attention.mean(axis=1)
+            elif head_fusion == "max":
+                fused = attention.max(axis=1)[0]
+            elif head_fusion == "min":
+                fused = attention.min(axis=1)[0]
+            else:
+                raise ValueError("Unsupported head fusion method: {}".format(head_fusion))
+            
+            if not isinstance(fused, torch.Tensor):
+                fused = torch.tensor(fused, dtype=torch.float32)
+            flat = fused.reshape(B, -1)
+            _, indices = flat.topk(int(flat.size(-1) * discard_ratio), dim=-1, largest=False)
+            indices = indices[indices!=0]
+            flat[0, indices] = 0
+            I = torch.eye(W).to(fused.device).unsqueeze(0).expand(B, -1, -1)  # (B, W, W)
+            a = (fused + I) / 2
+            a = a / a.sum(dim=-1, keepdim=True)
+
+            result = torch.matmul(a, result)
+    
+    print(f"Rollout shape: {result.shape}")
+    
+    result = result.cpu().numpy()
+    result = result/np.max(result, axis=(1, 2), keepdims=True)
+    return result
+
+def save_mask_on_image(mask, image_path, filename):
+    '''
+    mask : rollout 함수의 결과물
+    image_path : 시각화할 이미지
+    filename : 저장할 파일 이름
+    '''
+    # image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # image = np.float32(image)/255
+    mask = mask.reshape(4*48, 48)
+    heatmap = cv2.applyColorMap(np.uint8(255*mask), cv2.COLORMAP_JET)
+    heatmap = np.float32(heatmap) / 255
+    # cam = heatmap + np.float32(image)
+    # cam = cam / np.max(cam)
+    # cv2.imwrite(filename, np.uint8(255*cam))
+    cv2.imwrite(filename, np.uint8(255*heatmap))
 
 def visualize_patch_attention(cross_attn_weights, filename, head_fusion="mean"):
     """
