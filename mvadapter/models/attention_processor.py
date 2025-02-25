@@ -9,7 +9,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-from mvadapter.models.attention_util import get_attention_weight, rollout, visualize_patch_attention, save_mask_on_image
+from mvadapter.models.attention_util import get_attention_weight, downsample_patch, fuse_heads, rollout, show_mask_on_image
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -114,8 +114,9 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.use_mv = use_mv
         self.use_ref = use_ref
         self.t = 0
-        self.cross_attn_weights = []
-        self.mv_attn_weights = []
+        #self.cross_attn_weights = []
+        #self.mv_attn_weights = []
+        self.cross_attn_rollout=None
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
@@ -246,7 +247,6 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
-        print(f"{self.name} inner dim : {inner_dim}, head dim : {head_dim}")
 
         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
@@ -343,23 +343,26 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 1, 2
             )
 
-            selected_patch = 288
+            selected_patch = 179   ###################################################################################<--------------change the patch here
             hidden_states_ref = F.scaled_dot_product_attention(
                 query_ref, key_ref, value_ref, dropout_p=0.0, is_causal=False
             )
             
-            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref)[batch_size//2:, :, :, selected_patch].detach().cpu().numpy()# W 계산
-            Q = cross_attn_weight.shape[2]  # 현재 shape (B, H, Q)
-            W = int(math.sqrt(Q))
-            cross_attn_weight = rearrange(cross_attn_weight, "b h (w1 w2) -> b h w1 w2", w1=W, w2=W)
-            print(f"{self.name} weights: {cross_attn_weight.shape}") #cross_attn_weight: (Batch, Heads, Query Length)
-            self.cross_attn_weights.append(cross_attn_weight)
+            Patch_W = 24
+            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref)[batch_size//2:, :, :, :].detach().cpu() #(B, H, Q, K)
+            cross_attn_weight = fuse_heads(cross_attn_weight, head_fusion="mean") #(B, H, Q, K) -> (B, Q, K)
+            cross_attn_weight = cross_attn_weight[:, :, selected_patch] #(B, Q) NEED TO CHECK HERE. Whether to visualize query or key
+            _, Q = cross_attn_weight.shape
+            W = int(Q**0.5)
+            cross_attn_weight = rearrange(cross_attn_weight, "b (w h) -> b w h", w=W, h=W) #(B, Q) -> (B, W, H)
+            cross_attn_weight = downsample_patch(cross_attn_weight, Patch_W).to(hidden_states_ref.device) #(B, W, H) -> (B, 24, 24)
+            #print(f"3. downsample{cross_attn_weight.shape} - max: {cross_attn_weight.max()}, min: {cross_attn_weight.min()}")
+            self.cross_attn_rollout = rollout(self.cross_attn_rollout, cross_attn_weight)
             if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
-                # visualize_patch_attention(self.cross_attn_weights, filename=f"attn_maps/{selected_patch}-{self.t}", head_fusion="min")
-                mask = rollout(self.cross_attn_weights, 0.9, "mean")
-                save_mask_on_image(mask, "assets/demo/i2mv/dino.png", f"attn_maps/heat-{selected_patch}-{self.t}.png")
                 self.t += 1
-                self.cross_attn_weights.clear()
+                self.t = 0 if self.t >50 else self.t
+                show_mask_on_image(self.cross_attn_rollout, "assets/demo/i2mv/dino.png", f"dino_{selected_patch}-{self.t}", save=False)
+                self.cross_attn_rollout = None
 
             hidden_states_ref = hidden_states_ref.transpose(1, 2).reshape(
                 batch_size, -1, attn.heads * head_dim

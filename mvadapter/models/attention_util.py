@@ -4,7 +4,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import cv2
+from IPython.display import clear_output, display
+from PIL import Image
 
+def downsample_patch(tensor, target_patch):
+    B, W, H = tensor.shape
+    tensor = tensor.unsqueeze(1) # (B, 1, W, H)
+    tensor = F.interpolate(tensor, size=(target_patch, target_patch), mode='bilinear', align_corners=False)
+    return tensor.squeeze(1) #(B, target, target)
+
+    
 def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
     """
     Scaled Dot-Product Attention을 직접 구현하여 어텐션 가중치를 반환하는 함수
@@ -40,132 +49,86 @@ def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
 
     return attention_weights
 
-def rollout(attentions, discard_ratio, head_fusion):
-    '''
-    attentions : (B, Head, W, H) 크기의 텐서가 Layer 수만큼 쌓인 리스트
-    discard_ratio : 어떤 비율의 어텐션 맵을 버릴지 결정
-    head_fusion : 어떤 방식으로 Head를 합칠지 결정
-    '''
-
-    B, H, W, W_ = attentions[0].shape
-    result = torch.eye(W).repeat(B, 1, 1)
-    with torch.no_grad():
-        for attention in attentions:
-            if head_fusion == "mean":
-                fused = attention.mean(axis=1)
-            elif head_fusion == "max":
-                fused = attention.max(axis=1)[0]
-            elif head_fusion == "min":
-                fused = attention.min(axis=1)[0]
-            else:
-                raise ValueError("Unsupported head fusion method: {}".format(head_fusion))
-            
-            if not isinstance(fused, torch.Tensor):
-                fused = torch.tensor(fused, dtype=torch.float32)
-            flat = fused.reshape(B, -1)
-            _, indices = flat.topk(int(flat.size(-1) * discard_ratio), dim=-1, largest=False)
-            indices = indices[indices!=0]
-            flat[0, indices] = 0
-            I = torch.eye(W).to(fused.device).unsqueeze(0).expand(B, -1, -1)  # (B, W, W)
-            a = (fused + I) / 2
-            a = a / a.sum(dim=-1, keepdim=True)
-
-            result = torch.matmul(a, result)
-    
-    print(f"Rollout shape: {result.shape}")
-    
-    result = result.cpu().numpy()
-    result = result/np.max(result, axis=(1, 2), keepdims=True)
-    return result
-
-def save_mask_on_image(mask, image_path, filename):
-    '''
-    mask : rollout 함수의 결과물
-    image_path : 시각화할 이미지
-    filename : 저장할 파일 이름
-    '''
-    # image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    # image = np.float32(image)/255
-    mask = mask.reshape(4*48, 48)
-    heatmap = cv2.applyColorMap(np.uint8(255*mask), cv2.COLORMAP_JET)
-    heatmap = np.float32(heatmap) / 255
-    # cam = heatmap + np.float32(image)
-    # cam = cam / np.max(cam)
-    # cv2.imwrite(filename, np.uint8(255*cam))
-    cv2.imwrite(filename, np.uint8(255*heatmap))
-
-def visualize_patch_attention(cross_attn_weights, filename, head_fusion="mean"):
+def fuse_heads(attention_map, head_fusion="mean"):
     """
-    cross_attn_weights: 여러 레이어에서 수집한 attention weight 리스트.
-                         각 원소의 shape는 (B, Heads, Query Length)
-    filename: 저장할 파일 이름 (확장자는 자동으로 ".png"가 붙음)
-    head_fusion: 융합 방식 ("mean" 또는 "max")
+    여러 개의 어텐션 헤드를 하나로 통합하는 함수
     
-    주의: 각 레이어마다 query length가 다를 수 있으므로,
-         모든 레이어 중 최대 query length를 기준으로 리사이징한 후 rollout 적용합니다.
-         (불필요한 변수 할당 없이 in-place 연산 위주로 구현)
+    Args:
+        attention_map (Tensor): 어텐션 맵 (Batch, Heads, ...)
+        head_fusion (str): 헤드 통합 방법 (mean, max, min)
+    
+    Returns:
+        output (Tensor): 통합된 어텐션 맵 (Batch, ...)
     """
-    import numpy as np
-    from PIL import Image
-    import math
-    import matplotlib.cm as cm
+    if head_fusion == "mean":
+        return attention_map.mean(dim=1)
+    elif head_fusion == "max":
+        return attention_map.max(dim=1).values
+    elif head_fusion == "min":
+        return attention_map.min(dim=1).values
+    else:
+        raise ValueError(f"Unsupported head fusion method: {head_fusion}")
 
-    # 배치 크기와 최대 query length 결정 (최소한의 변수만 사용)
-    first = cross_attn_weights[0]
-    if hasattr(first, 'detach'):
-        first = first.detach().cpu().numpy()
-    B = first.shape[0]
-    max_query_length = 0
-    for attn in cross_attn_weights:
-        if hasattr(attn, 'detach'):
-            attn = attn.detach().cpu().numpy()
-        cur_len = attn.shape[-1]
-        if cur_len > max_query_length:
-            max_query_length = cur_len
-    max_side = int(math.sqrt(max_query_length))
-    if max_side * max_side != max_query_length:
-        raise ValueError("최대 query length (L={})가 정사각형 형태가 아닙니다.".format(max_query_length))
-    
-    # rollout 초기화 (배치별, 최대 query length)
-    rollout = np.ones((B, max_query_length), dtype=np.float32)
 
-    # 각 레이어 처리: head fusion 후 바로 rollout에 반영
-    for attn in cross_attn_weights:
-        if hasattr(attn, 'detach'):
-            attn = attn.detach().cpu().numpy()
-        # head fusion (B, Query Length)
-        if head_fusion == "mean":
-            fused = np.mean(attn, axis=1)
-        elif head_fusion == "max":
-            fused = np.max(attn, axis=1)
-        elif head_fusion == "min":
-            fused = np.min(attn, axis=1)
-        else:
-            raise ValueError("Unsupported head fusion method: {}".format(head_fusion))
-        current_query_length = fused.shape[1]
-        current_side = int(math.sqrt(current_query_length))
-        if current_side * current_side != current_query_length:
-            raise ValueError("어떤 레이어의 query length (L={})가 정사각형 형태가 아닙니다.".format(current_query_length))
-        
-        # 크기가 다르면 배치별로 개별 resize 후 rollout에 곱셈 반영
-        if current_query_length != max_query_length:
-            for i in range(B):
-                cur_map = fused[i].reshape(current_side, current_side)
-                im = Image.fromarray(cur_map.astype(np.float32), mode='F')
-                resized_im = im.resize((max_side, max_side), resample=Image.BILINEAR)
-                rollout[i] *= np.array(resized_im).flatten()
-        else:
-            rollout *= fused  # 크기가 같으면 바로 곱셈
+def rollout(prev_rollout, attention_map):
+    """
+    Args:
+        prev_rollout (Tensor): 이전에 rollout된 어텐션 맵 (Batch, W, H)
+        attention_map (Tensor): 현재 어텐션 맵 (Batch, W, H)
+    """
+    B, W, H = attention_map.shape
+    if prev_rollout is None:
+        return attention_map
+    else:
+        identity = torch.eye(W, device=attention_map.device, dtype=attention_map.dtype).expand(B, W, H)
+        return torch.bmm(attention_map+identity, prev_rollout)
 
-    # 최종 rollout 결과를 배치별로 정규화하여 하나의 이미지에 좌우로 붙임
-    colormap = cm.get_cmap('jet')
-    final_img = Image.new("RGB", (B * max_side, max_side))
-    for i in range(B):
-        attn_map = rollout[i].reshape(max_side, max_side)
-        attn_map = attn_map/np.max(attn_map)
-        colored = (colormap(attn_map)[..., :3] * 255).astype(np.uint8)
-        heatmap_img = Image.fromarray(colored, mode="RGB")
-        final_img.paste(heatmap_img, (i * max_side, 0))
-    
-    final_img.save(filename + "rgb.png")
+
+
+import numpy as np
+import cv2
+from PIL import Image
+from IPython.display import display, clear_output
+
+import numpy as np
+import cv2
+from PIL import Image
+from IPython.display import display, clear_output
+
+def show_mask_on_image(mask, img_path, filename="mask", save=True, need_display=True):
+    """
+    Args:
+        mask (Tensor): (B, W, H) 형태의 attention mask (값 범위 [0,1])
+        img_path (str): 원본 이미지 경로 (현재 사용되지 않음)
+        filename (str): 저장할 파일명
+    """
+    mask = mask.detach().cpu().numpy()  # GPU → CPU 변환
+    B, W, H = mask.shape  # 배치 크기 유지
+
+    # NaN 및 Inf 값 처리
+    mask = np.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
+
+    # 값이 모두 0이면 대비 조정 (최소 0, 최대 1 설정)
+    mask_min = np.min(mask, axis=(1, 2), keepdims=True)
+    mask_max = np.max(mask, axis=(1, 2), keepdims=True)
+    mask = np.where(mask_max == mask_min, mask + 1e-6, (mask - mask_min) / (mask_max - mask_min))  # Min-Max Scaling
+
+    # uint8 변환 후 컬러맵 적용 (BGR로 생성됨)
+    heatmaps = [cv2.applyColorMap(np.uint8(m * 255), cv2.COLORMAP_JET) for m in mask]
+
+    # 해상도 증가 (8배 확대) 및 uint8 변환 유지
+    heatmaps_resized = [cv2.resize(hm, (H * 8, W * 8), interpolation=cv2.INTER_CUBIC) for hm in heatmaps]
+
+    # 배치 차원 유지 → 가로로 병합 (W*8, H*B*8)
+    combined_heatmap = np.hstack(heatmaps_resized)  # (W*8, H*B*8, 3)
+
+    # ✅ PNG로 저장하는 이미지와 display에서 보여주는 이미지가 동일하게 설정
+    if save:
+        cv2.imwrite(f"attn_maps/heat-{filename}.png", combined_heatmap)
+        print(f"✅ Heatmap saved to attn_maps/heat-{filename}.png")
+
+    if need_display:
+        clear_output(wait=True)
+        img_pil = Image.fromarray(cv2.cvtColor(combined_heatmap, cv2.COLOR_BGR2RGB))  # OpenCV BGR → RGB 변환
+        display(img_pil)  # 바로 표시
+
