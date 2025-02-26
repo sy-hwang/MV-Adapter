@@ -114,6 +114,8 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.use_mv = use_mv
         self.use_ref = use_ref
         self.t = 0
+        self.cross_attn_rollout = None
+        self.self_attn_rollout = None
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
@@ -180,7 +182,6 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
 
         self.visualize_cross_attn_map1 = False
         self.visualize_cross_attn_map2 = True
-        self.cross_attn_rollout = None
 
         if num_views is not None:
             self.num_views = num_views
@@ -328,6 +329,9 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             hidden_states_mv = self.to_out_mv[0](hidden_states_mv)
             # dropout
             hidden_states_mv = self.to_out_mv[1](hidden_states_mv)
+
+
+            #self_attn_weight = get_attention_weight(query_mv, key_mv, value_mv) # (Batch x View x ih, Head, iw, View*iw) [384, 10, 48, 192] or [192, 20, 24, 96]
 
             #selected_self_batch = 0 ###################################################################################<--------------change the image here
             #selected_self_patch = 179

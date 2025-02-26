@@ -115,6 +115,7 @@ def rollout(prev_rollout, attention_map):
     identity = torch.eye(K, device=attention_map.device, dtype=attention_map.dtype).expand_as(attention_map)
 
     if prev_rollout is None:
+        print("this should be first block")
         return attention_map
     else:
         return torch.matmul(attention_map+identity, prev_rollout)
