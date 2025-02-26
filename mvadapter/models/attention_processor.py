@@ -9,7 +9,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-from mvadapter.models.attention_util import get_attention_weight, rollout_cross_attention_map_1, rollout_cross_attention_map_2, show_mask_on_image
+from mvadapter.models.attention_util import get_attention_weight, rollout_cross_attention_map_1, rollout_cross_attention_map_2, show_mask_on_image, rollout_cross_attention_map, get_heatmap_from_key_patch, visualize_heatmap, get_heatpmap_from_query_patch
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -114,10 +114,10 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.use_mv = use_mv
         self.use_ref = use_ref
         self.t = 0
-        #self.cross_attn_weights = []
-        #self.mv_attn_weights = []
-        self.cross_attn_rollout_1=None
-        self.cross_attn_rollout_2=None
+
+        self.visualize_cross_attn_map1 = True
+        self.visualize_cross_attn_map2 = False
+        self.cross_attn_rollout = None
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
@@ -353,34 +353,28 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 query_ref, key_ref, value_ref, dropout_p=0.0, is_causal=False
             )
 
-            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref)[batch_size//2:, :, :, :].detach().cpu() #(B, H, Q, K)
+            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref)[batch_size//2:, :, :, :] #(B, H, Q, K)
+            self.cross_attn_rollout = rollout_cross_attention_map(cross_attn_weight, 
+                                                                    head_fusion="mean",
+                                                                    downsample=24,
+                                                                    prev_rollout=self.cross_attn_rollout,
+                                                                    device="cuda",
+                                                                    ).detach().cpu()
 
-            ###################################################################################
-            # self.cross_attn_rollout_1 = rollout_cross_attention_map_1(cross_attn_weight, 
-            #                               head_fusion="mean", 
-            #                               selected_patch=102, 
-            #                               downsample=24, 
-            #                               prev_rollout=self.cross_attn_rollout_1,
-            #                               device=hidden_states_ref.device)
-
-            # if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
-            #     self.t += 1
-            #     show_mask_on_image(self.cross_attn_rollout_1, "assets/demo/i2mv/dino.png", f"dino_0-{self.t}", save=False)
-            #     self.cross_attn_rollout_1 = None
-#########################################################################################################################################################################
-
-            self.cross_attn_rollout_2 = rollout_cross_attention_map_2(cross_attn_weight,
-                                            head_fusion="mean",
-                                            selected_view=3,
-                                            selected_patch=102,
-                                            downsample=24,
-                                            prev_rollout=self.cross_attn_rollout_2,
-                                            device=hidden_states_ref.device
-                                        )
             if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
+                if(self.visualize_cross_attn_map1):
+                    p = 179
+                    heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
+                    visualize_heatmap(heatmap)
+                    print(f"visualize heatmap from key patch 517")
+                if(self.visualize_cross_attn_map2):
+                    v = 0
+                    p = 517
+                    heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
+                    visualize_heatmap(heatmap)
+                    print(f"visualize heatmap from query view 0 patch 517")
                 self.t += 1
-                show_mask_on_image(self.cross_attn_rollout_2, "assets/demo/i2mv/dino.png", f"dino_1-{self.t}", save=False)
-                self.cross_attn_rollout_2 = None
+                self.cross_attn_rollout=None
 #########################################################################################################################################################################
 
             hidden_states_ref = hidden_states_ref.transpose(1, 2).reshape(
