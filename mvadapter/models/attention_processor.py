@@ -9,7 +9,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-from mvadapter.models.attention_util import get_attention_weight, rollout_cross_attention_map_1, rollout_cross_attention_map_2, show_mask_on_image, rollout_cross_attention_map, get_heatmap_from_key_patch, visualize_heatmap, get_heatpmap_from_query_patch
+from mvadapter.models.attention_util import get_attention_weight, rollout_cross_attention_map, get_heatmap_from_key_patch, visualize_heatmap, get_heatpmap_from_query_patch
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -115,10 +115,6 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.use_ref = use_ref
         self.t = 0
 
-        self.visualize_cross_attn_map1 = True
-        self.visualize_cross_attn_map2 = False
-        self.cross_attn_rollout = None
-
         if self.use_mv:
             self.to_q_mv = nn.Linear(
                 in_features=query_dim, out_features=inner_dim, bias=False
@@ -181,6 +177,10 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)
+
+        self.visualize_cross_attn_map1 = False
+        self.visualize_cross_attn_map2 = True
+        self.cross_attn_rollout = None
 
         if num_views is not None:
             self.num_views = num_views
@@ -363,16 +363,16 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
 
             if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
                 if(self.visualize_cross_attn_map1):
-                    p = 179
-                    heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
-                    visualize_heatmap(heatmap)
-                    print(f"visualize heatmap from key patch 517")
-                if(self.visualize_cross_attn_map2):
-                    v = 0
                     p = 517
+                    heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
+                    visualize_heatmap(heatmap, dirname=f"dino-{p}", step=self.t, save=True)
+                    print(f"visualize heatmap from key patch {p}")
+                if(self.visualize_cross_attn_map2):
+                    v = 3
+                    p = 68
                     heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
-                    visualize_heatmap(heatmap)
-                    print(f"visualize heatmap from query view 0 patch 517")
+                    visualize_heatmap(heatmap, dirname=f"dino-{v}-{p}", step=self.t, save=True)
+                    print(f"visualize heatmap from query view {v} patch {p}")
                 self.t += 1
                 self.cross_attn_rollout=None
 #########################################################################################################################################################################

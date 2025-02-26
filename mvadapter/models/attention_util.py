@@ -7,6 +7,7 @@ import cv2
 from IPython.display import clear_output, display
 from PIL import Image
 from einops import rearrange
+import os
 
 def downsample_attention(tensor, target_feature_dim=24):
     """
@@ -156,7 +157,7 @@ def get_heatpmap_from_query_patch(attention_weight, selected_view=0, selected_pa
     heatmap = rearrange(heatmap, '(w h) -> w h', w=int(K**0.5), h=int(K**0.5)) #(K) -> (W, H)
     return heatmap # (W, H)
 
-def visualize_heatmap(mask, filename="mask", save=False, need_display=True):
+def visualize_heatmap(mask, dirname="mask", step=0,  save=False, need_display=True):
     """
     Args:
         mask (Tensor): (B, W, H) 형태의 attention mask (값 범위 [0,1])
@@ -185,91 +186,12 @@ def visualize_heatmap(mask, filename="mask", save=False, need_display=True):
 
     # PNG로 저장하는 이미지와 display에서 보여주는 이미지가 동일하게 설정
     if save:
-        cv2.imwrite(f"attn_maps/heat-{filename}.png", combined_heatmap)
-        print(f"✅ Heatmap saved to attn_maps/heat-{filename}.png")
+        save_dir = f"attn_maps/{dirname}/"
+        os.makedirs(save_dir, exist_ok=True)
+        cv2.imwrite(f"{save_dir}{step:02d}.png", combined_heatmap)
 
     if need_display:
         clear_output(wait=True)
         img_pil = Image.fromarray(cv2.cvtColor(combined_heatmap, cv2.COLOR_BGR2RGB))  # OpenCV BGR → RGB 변환
         display(img_pil)  # 바로 표시
     
-
-def rollout_cross_attention_map_1(attention_weight, head_fusion="mean", selected_patch=0, downsample=24, prev_rollout=None, device='cuda'):
-    """
-    rolling out the image cross attention map, with pure cross-attention weight.
-    reference image(key)를 기준으로 query image(mv images)의 attention map을 시각화하는 함수
-    Args:
-        attention_weight (Tensor): (B, H, Q, K)
-        head_fusion (str): 헤드 통합 방법 (mean, max, min)
-        selected_patch (int): 선택한 패치 번호 (downsample*downsample 보다 작아야 함)
-        downsample (int): 다운샘플링 크기
-    """
-    B, H, Q, K = attention_weight.shape
-    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K)
-    attention_weight = attention_weight[:, :, selected_patch] # (B, Q) NEED TO CHECK. Whether to visualize Q or K
-    W = int(Q**0.5)
-    attention_weight = rearrange(attention_weight, 'b (w h) -> b w h', w=W, h=W) #(B, Q) -> (B, W, H)
-    attention_weight = downsample_patch(attention_weight, downsample).to(device) # (B, downsample, downsample)
-    return rollout(prev_rollout, attention_weight)
-
-def rollout_cross_attention_map_2(attention_weight, head_fusion="mean", selected_view=0,selected_patch=0, downsample=24, prev_rollout=None, device='cuda'):
-    """
-    rolling out the image cross attention map, with pure cross-attention weight.
-    mv images들 중 하나(query)를 기준으로 reference image(key)의 attention map을 시각화하는 함수
-    Args:
-        attention_weight (Tensor): (B, H, Q, K)
-        head_fusion (str): 헤드 통합 방법 (mean, max, min)
-        selected_view (int): 선택한 mv image
-        selected_patch (int): 선택한 패치 번호 (downsample*downsample 보다 작아야 함)
-        downsample (int): 다운샘플링 크기
-    """
-    B, H, Q, K = attention_weight.shape
-    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K)
-    attention_weight = attention_weight[selected_view, selected_patch, :] # (K)
-    W = int(K**0.5)
-    attention_weight = rearrange(attention_weight, '(w h) -> w h', w=W, h=W) #(K) -> (W, H)
-    attention_weight = downsample_patch(attention_weight, downsample).to(device) # (downsample, downsample)
-    return rollout(prev_rollout, attention_weight)
-
-
-
-
-def show_mask_on_image(mask, img_path, filename="mask", save=True, need_display=True):
-    """
-    Args:
-        mask (Tensor): (B, W, H), 또는 (W, H) 형태의 attention mask (값 범위 [0,1])
-        img_path (str): 원본 이미지 경로 (현재 사용되지 않음)
-        filename (str): 저장할 파일명
-    """
-    mask = mask.detach().cpu().numpy()  # GPU → CPU 변환
-    if mask.ndim == 2:
-        mask = mask[np.newaxis, :, :]  # (W, H) → (1, W, H)
-    B, W, H = mask.shape  # 배치 크기 유지
-
-    # NaN 및 Inf 값 처리
-    mask = np.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
-
-    # 값이 모두 0이면 대비 조정 (최소 0, 최대 1 설정)
-    mask_min = np.min(mask, axis=(1, 2), keepdims=True)
-    mask_max = np.max(mask, axis=(1, 2), keepdims=True)
-    mask = np.where(mask_max == mask_min, mask, (mask - mask_min) / (mask_max - mask_min))  # Min-Max Scaling
-
-    # uint8 변환 후 컬러맵 적용 (BGR로 생성됨)
-    heatmaps = [cv2.applyColorMap(np.uint8(m * 255), cv2.COLORMAP_JET) for m in mask]
-
-    # 해상도 증가 (8배 확대) 및 uint8 변환 유지
-    heatmaps_resized = [cv2.resize(hm, (H * 8, W * 8), interpolation=cv2.INTER_CUBIC) for hm in heatmaps]
-
-    # 배치 차원 유지 → 가로로 병합 (W*8, H*B*8)
-    combined_heatmap = np.hstack(heatmaps_resized)  # (W*8, H*B*8, 3)
-
-    # ✅ PNG로 저장하는 이미지와 display에서 보여주는 이미지가 동일하게 설정
-    if save:
-        cv2.imwrite(f"attn_maps/heat-{filename}.png", combined_heatmap)
-        print(f"✅ Heatmap saved to attn_maps/heat-{filename}.png")
-
-    if need_display:
-        clear_output(wait=True)
-        img_pil = Image.fromarray(cv2.cvtColor(combined_heatmap, cv2.COLOR_BGR2RGB))  # OpenCV BGR → RGB 변환
-        display(img_pil)  # 바로 표시
-

@@ -5,6 +5,9 @@ import numpy as np
 import torch
 from PIL import Image
 
+import os
+import IPython.display as display
+
 
 def tensor_to_image(
     data: Union[Image.Image, torch.Tensor, np.ndarray],
@@ -143,3 +146,47 @@ def draw_patches(image, num_patches=(24, 24), highlight_index=None,
             draw.rectangle([x1, y1, x2, y2], outline=highlight_color, width=highlight_width)
 
     return img_with_patches
+
+from PIL import Image
+import os
+import IPython.display as display
+
+def sorted_numerically(file_list):
+    """ 숫자로 정렬하기 위한 키 함수 """
+    return sorted(file_list, key=lambda x: int(os.path.splitext(x)[0]))
+
+def resize_keep_aspect(image, target_height):
+    """
+    원본 비율을 유지하면서 세로 길이만 설정하고 가로 길이는 자동 조정
+    """
+    width, height = image.size
+    aspect_ratio = width / height
+    new_width = int(target_height * aspect_ratio)
+    return image.resize((new_width, target_height), Image.Resampling.LANCZOS)
+
+def png_to_gif(input_folder, output_gif, duration=100, loop=0):
+    """
+    PNG 시퀀스를 GIF로 변환하고 Jupyter Notebook에서 바로 표시하는 함수
+    
+    :param input_folder: PNG 이미지가 있는 폴더 경로
+    :param output_gif: 생성할 GIF 파일 경로
+    :param duration: 각 프레임의 지속 시간 (ms 단위, 기본값: 100ms)
+    :param loop: GIF 루프 횟수 (0이면 무한 반복)
+    """
+    # PNG 파일 가져오기 및 숫자 순서대로 정렬
+    images = [f for f in os.listdir(input_folder) if f.endswith(".png")]
+    images = sorted_numerically(images)
+    images = [os.path.join(input_folder, f) for f in images]
+
+    # 이미지 로드
+    frames = [resize_keep_aspect(Image.open(img).convert("P", palette=Image.ADAPTIVE), 48) for img in images]
+    
+    # GIF 저장
+    if frames:
+        frames[0].save(output_gif, save_all=True, append_images=frames[1:], duration=duration, loop=loop, optimize=True)
+        print(f"gif 저장 완료: {output_gif}, filesize:{os.path.getsize(output_gif)/1024:.2f}KB")
+
+        # Jupyter Notebook에서 GIF 표시
+        display.display(display.Image(output_gif))
+    else:
+        print("PNG 파일을 찾을 수 없습니다.")
