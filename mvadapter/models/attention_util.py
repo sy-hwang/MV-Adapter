@@ -9,7 +9,7 @@ from PIL import Image
 from einops import rearrange
 import os
 
-def downsample_attention(tensor, target_feature_dim=24):
+def downsample_cross_attention(tensor, target_feature_dim=24):
     """
     downsample the attention map
     Args:
@@ -39,6 +39,35 @@ def downsample_attention(tensor, target_feature_dim=24):
 
     return tensor.view(B, Q, K)
 
+def downsample_self_attention(tensor, target_feature_dim=24):
+    """
+    downsample the attention map
+    Args:
+        tensor (Tensor): (B, Q, K) = (N*h, w, w*N)
+        target_feature_dim (int): target feature dimension
+    """
+    B, Q, K = tensor.shape
+    W=H=Q
+    if W == target_feature_dim:
+        return tensor
+    
+    N = B//H
+    print(f"downsample_self_attention: B={B}, H={H}, Q={Q}, K={K}, N={N}")
+    scale_ratio = target_feature_dim//W
+
+    tensor = tensor.view(N, H, W, W, N)
+    tensor = tensor.permute(0, 2, 3, 4, 1)
+
+def upsample_attention_map(tensor, target_feature_dim=48):
+    """
+    upsample the attention map
+    Args:
+        tensor (Tensor): (B, Q, K)
+        target_feature_dim (int): target feature dimension
+    """
+    tensor = tensor.unsqueeze(1) # (B, 1, Q, K)
+    tensor = F.interpolate(tensor, size = (target_feature_dim, target_feature_dim), mode='bicubic').clamp_(min=0)
+    return tensor
 
 
 def downsample_patch(tensor, target_patch):
@@ -49,7 +78,7 @@ def downsample_patch(tensor, target_patch):
     return tensor.view(*original_shape, target_patch, target_patch)
 
     
-def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
+def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False, use_softmax=True):
     """
     Scaled Dot-Product Attention을 직접 구현하여 어텐션 가중치를 반환하는 함수
     
@@ -68,16 +97,17 @@ def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False):
     d_k = q.size(-1)
 
     # (Q @ K^T) / sqrt(d_k) 연산 수행
-    attn_logits = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(d_k, dtype=q.dtype))
+    attention_weights = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(d_k, dtype=q.dtype))
 
     # 마스크가 있을 경우 적용 (예: 패딩 마스크 또는 캐주얼 마스크)
     if is_causal:
         seq_len = q.shape[-2]
         causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).to(q.device)  # Upper triangular matrix
-        attn_logits = attn_logits.masked_fill(causal_mask == 1, float('-inf'))  # 미래 정보를 가려줌
+        attention_weights = attention_weights.masked_fill(causal_mask == 1, float('-inf'))  # 미래 정보를 가려줌
     
     # Softmax를 적용하여 확률값으로 변환 (어텐션 가중치 계산)
-    attention_weights = F.softmax(attn_logits, dim=-1)
+    if use_softmax:
+        attention_weights = F.softmax(attention_weights, dim=-1)
 
     if dropout_p > 0.0:
         attention_weights = F.dropout(attention_weights, p=dropout_p)
@@ -128,8 +158,19 @@ def rollout_cross_attention_map(attention_weight, head_fusion="mean", downsample
     B, H, Q, K = attention_weight.shape
     prev_rollout = prev_rollout.to(device) if prev_rollout is not None else None
     attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K) = (B, W*W, W*W)
-    attention_weight = downsample_attention(attention_weight, 24) # (B, 576, 576)
+    attention_weight = downsample_cross_attention(attention_weight, downsample) # (B, 576, 576)
     return rollout(prev_rollout, attention_weight)
+
+def rollout_self_attention_map(attention_weight, head_fusion="mean", downsample=24, prev_rollout=None, device='cuda'):
+    """
+    rolling out the row wise self attention map
+    """
+    B, H, Q, K = attention_weight.shape # (N x h, Head, w, NxW), h=w
+    prev_rollout = prev_rollout.to(device) if prev_rollout is not None else None
+    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K) = (N*h, w, w*N)
+    attention_weight = downsample_self_attention(attention_weight, downsample) # (N*24, 24, 24*N)
+    return rollout(prev_rollout, attention_weight)
+
 
 def get_heatmap_from_key_patch(attention_weight, selected_patch=0):
     """
@@ -158,7 +199,7 @@ def get_heatpmap_from_query_patch(attention_weight, selected_view=0, selected_pa
     heatmap = rearrange(heatmap, '(w h) -> w h', w=int(K**0.5), h=int(K**0.5)) #(K) -> (W, H)
     return heatmap # (W, H)
 
-def visualize_heatmap(mask, dirname="mask", step=0,  save=False, need_display=True):
+def visualize_heatmap(mask, dirname="mask", step=0,  save=False, need_display=True, minmaxscale=True):
     """
     Args:
         mask (Tensor): (B, W, H) 형태의 attention mask (값 범위 [0,1])
@@ -171,10 +212,10 @@ def visualize_heatmap(mask, dirname="mask", step=0,  save=False, need_display=Tr
     # NaN 및 Inf 값 처리
     mask = np.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
 
-    # 값이 모두 0이면 대비 조정 (최소 0, 최대 1 설정)
-    mask_min = np.min(mask, axis=(1, 2), keepdims=True)
-    mask_max = np.max(mask, axis=(1, 2), keepdims=True)
-    mask = np.where(mask_max == mask_min, mask, (mask - mask_min) / (mask_max - mask_min))  # Min-Max Scaling
+    if(minmaxscale):
+        mask_min = np.min(mask, axis=(1, 2), keepdims=True)
+        mask_max = np.max(mask, axis=(1, 2), keepdims=True)
+        mask = np.where(mask_max == mask_min, mask, (mask - mask_min) / (mask_max - mask_min))
 
     # uint8 변환 후 컬러맵 적용 (BGR로 생성됨)
     heatmaps = [cv2.applyColorMap(np.uint8(m * 255), cv2.COLORMAP_JET) for m in mask]
