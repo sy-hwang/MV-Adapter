@@ -95,7 +95,7 @@ import numpy as np
 
 from PIL import Image, ImageDraw
 
-def draw_patches(image, num_patches=(24, 24), highlight_index=None,
+def draw_patches(image, num_patches=(24, 24), highlight_index=None, highlight_column=None,
                                 line_color=(255, 255, 255), line_width=2,
                                 highlight_color=(255, 0, 0), highlight_width=4):
     """
@@ -105,6 +105,7 @@ def draw_patches(image, num_patches=(24, 24), highlight_index=None,
         image (PIL.Image): 입력 이미지
         num_patches (tuple): 패치 개수 (가로 개수, 세로 개수)
         highlight_index (int): 강조할 패치의 리니어 인덱스 (0-based index)
+        highlight_column (int): 강조할 패치의 열 인덱스 (0-based index)
         line_color (tuple): 경계선 색상 (RGB, 기본: 흰색)
         line_width (int): 경계선 두께 (기본: 2px)
         highlight_color (tuple): 강조 패치 테두리 색상 (RGB, 기본: 빨간색)
@@ -144,6 +145,14 @@ def draw_patches(image, num_patches=(24, 24), highlight_index=None,
 
             # 강조된 패치 테두리 (빨간색 + 굵은 선)
             draw.rectangle([x1, y1, x2, y2], outline=highlight_color, width=highlight_width)
+    
+    if highlight_column is not None:
+        if 0 <= highlight_column < num_patches_w:
+            x_idx = highlight_column
+            for y_idx in range(num_patches_h):
+                x1, y1 = x_idx * patch_w, y_idx * patch_h
+                x2, y2 = x1 + patch_w, y1 + patch_h
+                draw.rectangle([x1, y1, x2, y2], outline=highlight_color, width=highlight_width)
 
     return img_with_patches
 
@@ -180,6 +189,45 @@ def png_to_gif(input_folder, output_gif, duration=100, loop=0):
 
     # 이미지 로드
     frames = [resize_keep_aspect(Image.open(img).convert("P", palette=Image.ADAPTIVE), 192) for img in images]
+    
+    # GIF 저장
+    if frames:
+        black_frame = Image.new("P", frames[0].size, 0)
+        frames.insert(0, black_frame)
+        frames[0].save(output_gif, save_all=True, append_images=frames[1:], duration=duration, loop=loop, optimize=True)
+        print(f"gif 저장 완료: {output_gif}, filesize:{os.path.getsize(output_gif)/1024:.2f}KB")
+
+        # Jupyter Notebook에서 GIF 표시
+        display.display(display.Image(output_gif))
+    else:
+        print("PNG 파일을 찾을 수 없습니다.")
+
+def mask_to_gif(input_folder, output_gif, ref_img, duration=100, loop=0):
+    """
+    PNG 시퀀스를 GIF로 변환하고 Jupyter Notebook에서 바로 표시하는 함수
+    
+    :param input_folder: PNG 이미지가 있는 폴더 경로
+    :param output_gif: 생성할 GIF 파일 경로
+    :param duration: 각 프레임의 지속 시간 (ms 단위, 기본값: 100ms)
+    :param loop: GIF 루프 횟수 (0이면 무한 반복)
+    """
+    # PNG 파일 가져오기 및 숫자 순서대로 정렬
+    masks = [f for f in os.listdir(input_folder) if f.endswith(".png")]
+    masks = sorted_numerically(masks)
+    masks = [os.path.join(input_folder, f) for f in masks]
+
+    ref_img = resize_keep_aspect(ref_img.convert("RGB"), 96)
+    ref_img_np = np.array(ref_img, dtype=np.float32)
+
+    frames = []
+    for mask in masks:
+        mask_img = Image.open(mask).convert("RGB")
+        mask_img = resize_keep_aspect(mask_img, 96)
+        mask_np = np.array(mask_img, dtype=np.float32)
+        blended_np = mask_np*0.8 + ref_img_np*0.2
+        blended_np = np.uint8(blended_np/np.max(blended_np)*255)
+        blended_img = Image.fromarray(blended_np).convert("P", palette=Image.ADAPTIVE)
+        frames.append(blended_img)
     
     # GIF 저장
     if frames:

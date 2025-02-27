@@ -9,7 +9,15 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from einops import rearrange
 from torch import nn
-from mvadapter.models.attention_util import get_attention_weight, rollout_cross_attention_map, get_heatmap_from_key_patch, visualize_heatmap, get_heatpmap_from_query_patch, rollout_self_attention_map
+from mvadapter.models.attention_util import (
+    get_attention_weight, 
+    rollout_cross_attention_map, 
+    get_heatmap_from_key_patch, 
+    visualize_heatmap, 
+    get_heatpmap_from_query_patch, 
+    rollout_self_attention_map,
+    get_heatmap_from_query_column
+    )
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -181,7 +189,8 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             deprecate("scale", "1.0.0", deprecation_message)
 
         self.visualize_cross_attn_map1 = False
-        self.visualize_cross_attn_map2 = True
+        self.visualize_cross_attn_map2 = False
+        self.visualize_self_attn_map = True
 
         if num_views is not None:
             self.num_views = num_views
@@ -331,21 +340,20 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             hidden_states_mv = self.to_out_mv[1](hidden_states_mv)
 
 
-            # self_attn_weight = get_attention_weight(query_mv, key_mv, value_mv)
-            # B_, _, _, _ = self_attn_weight.shape
-            # self_attn_weight = self_attn_weight[B_//2:, :, :, :] # (Batch x View x ih, Head, iw, View*iw) [384, 10, 48, 192] or [192, 20, 24, 96]
-            # self.self_attn_rollout = rollout_self_attention_map(self_attn_weight,
-            #                                                     head_fusion="mean",
-            #                                                     downsample=24,
-            #                                                     prev_rollout=self.self_attn_rollout,
-            #                                                     device="cuda",
-            #                                                     ).detach().cpu()
-            # print(f"name: {self.name}, self_attn_weight after rolling: {self_attn_weight.shape}")
-            #selected_self_batch = 0 ###################################################################################<--------------change the image here
-            #selected_self_patch = 179
-            #self_attn_weight = get_attention_weight(query_mv, key_mv, value_mv) # (Batch x View x ih, Head, iw, View*iw) [192, 10, 48, 192] or [96, 20, 24, 96]
-            #print(f"name: {self.name}, self_attn_weight: {self_attn_weight.shape}")
-
+            self_attn_weight = get_attention_weight(query_mv, key_mv, value_mv, use_softmax=True)
+            self_attn_weight = rearrange(
+                self_attn_weight,
+                "(b nv ih) h iw k -> (b nv) h (ih iw) k",
+                nv=self.num_views,
+                ih=height,
+            )
+            self_attn_weight = self_attn_weight[batch_size//2:, :, :, :] #  (b nv) h (ih iw) (nv iw)
+            self.self_attn_rollout = rollout_self_attention_map(self_attn_weight,
+                                                                head_fusion="mean",
+                                                                downsample=24,
+                                                                prev_rollout=self.self_attn_rollout,
+                                                                device=self_attn_weight.device,
+                                                                ).detach().cpu()
 
         if use_ref:
             reference_hidden_states = ref_hidden_states[self.name]
@@ -365,7 +373,7 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 query_ref, key_ref, value_ref, dropout_p=0.0, is_causal=False
             )
 
-            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref, use_softmax=True)[batch_size//2:, :, :, :] #(B, H, Q, K)
+            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref, use_softmax=True)[batch_size//2:, :, :, :] 
             self.cross_attn_rollout = rollout_cross_attention_map(cross_attn_weight, 
                                                                     head_fusion="mean",
                                                                     downsample=24,
@@ -385,8 +393,14 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                     heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
                     visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/dino.png", dirname=f"dino-{v}-{p}", step=self.t, save=True)
                     print(f"visualize heatmap from query view {v} patch {p}")
+                if(self.visualize_self_attn_map):
+                    v = 3
+                    c = 10
+                    heatmap = get_heatmap_from_query_column(self.self_attn_rollout, selected_view=v, selected_column=c)
+                    visualize_heatmap(heatmap, dirname=f"dino-self-{v}-{c}", step=self.t, save=True)
                 self.t += 1
                 self.cross_attn_rollout=None
+                self.self_attn_rollout=None
 #########################################################################################################################################################################
 
             hidden_states_ref = hidden_states_ref.transpose(1, 2).reshape(

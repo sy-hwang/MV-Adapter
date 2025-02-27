@@ -13,7 +13,7 @@ def downsample_cross_attention(tensor, target_feature_dim=24):
     """
     downsample the attention map
     Args:
-        tensor (Tensor): (B, H, Q, K)
+        tensor (Tensor): (B, Q, K)
         target_feature_dim (int): target feature dimension
     """
     B, Q, K = tensor.shape
@@ -43,20 +43,31 @@ def downsample_self_attention(tensor, target_feature_dim=24):
     """
     downsample the attention map
     Args:
-        tensor (Tensor): (B, Q, K) = (N*h, w, w*N)
+        tensor (Tensor): (B, Q, K) = (B, h*w, B*w)
         target_feature_dim (int): target feature dimension
     """
     B, Q, K = tensor.shape
-    W=H=Q
+    W = H = int(Q**0.5)
     if W == target_feature_dim:
         return tensor
     
-    N = B//H
-    print(f"downsample_self_attention: B={B}, H={H}, Q={Q}, K={K}, N={N}")
-    scale_ratio = target_feature_dim//W
+    scale = W//target_feature_dim
 
-    tensor = tensor.view(N, H, W, W, N)
-    tensor = tensor.permute(0, 2, 3, 4, 1)
+    #key 차원 다운샘플링
+    tensor = tensor.view(B, Q, B, W)
+    tensor = tensor.view(B, Q, B, target_feature_dim, scale)
+    tensor = tensor.mean(dim=-1) # (B, Q, B, target_feature_dim)
+    tensor = tensor.view(B, Q, B*target_feature_dim) # (B, Q, B*target_feature_dim)
+    K = B*target_feature_dim
+
+    #Query 차원 다운샘플링
+    tensor = tensor.view(B, H, W, K)
+    tensor = tensor.view(B, target_feature_dim, scale, target_feature_dim, scale, K)
+    tensor = tensor.mean(dim=(-2, -4)) # (B, target_feature_dim, target_feature_dim, K)
+    tensor = tensor.view(B, target_feature_dim*target_feature_dim, K) # (B, target_feature_dim*target_feature_dim, K)
+    Q = target_feature_dim*target_feature_dim
+    
+    return tensor.view(B, Q, K)
 
 def upsample_attention_map(tensor, target_dim=48):
     """
@@ -181,11 +192,11 @@ def rollout_self_attention_map(attention_weight, device, head_fusion="mean", dow
     """
     rolling out the row wise self attention map
     """
-    B, H, Q, K = attention_weight.shape # (N x h, Head, w, NxW), h=w
+    B, H, Q, K = attention_weight.shape # B H (ih iw) (nv iw)
     prev_rollout = prev_rollout.to(device) if prev_rollout is not None else None
-    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K) = (N*h, w, w*N)
-    attention_weight = downsample_self_attention(attention_weight, downsample) # (N*24, 24, 24*N)
-    return rollout(prev_rollout, attention_weight)
+    attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K) = (B, h*w, B*w)
+    attention_weight = downsample_self_attention(attention_weight, downsample) # (B, 24*24, B*24)
+    return sum_up_attention_map(prev_rollout, attention_weight)
 
 
 def get_heatmap_from_key_patch(attention_weight, selected_patch=0):
@@ -214,6 +225,22 @@ def get_heatpmap_from_query_patch(attention_weight, selected_view=0, selected_pa
     heatmap = attention_weight[selected_view, selected_patch, :] # (K)
     heatmap = rearrange(heatmap, '(w h) -> w h', w=int(K**0.5), h=int(K**0.5)) #(K) -> (W, H)
     return heatmap # (W, H)
+
+def get_heatmap_from_query_column(attention_weight, selected_view, selected_column):
+    """
+    Args:
+        attention_weight (Tensor): (B, Q, K) = (B, 24*24, B*24)
+        selected_view (int): selected mv image
+        selected_column (int): column index of query(mv) image
+    output:
+        heatmap (Tensor): (B, K) B of heatmaps for selected patch from query image 
+    """
+    B, Q, K = attention_weight.shape
+    W = H= int(Q**0.5)
+    attention_weight = attention_weight.view(B, H, W, B, W)
+    heatmap = attention_weight[selected_view, :, selected_column, :, :]
+    heatmap = rearrange(heatmap, 'h b w -> b h w')
+    return heatmap
 
 def visualize_heatmap(mask, dirname="mask", ref_image_path=None, step=0,  save=False, need_display=True, minmaxscale=True):
     """
