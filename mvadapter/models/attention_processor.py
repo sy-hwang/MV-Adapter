@@ -365,12 +365,12 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 query_ref, key_ref, value_ref, dropout_p=0.0, is_causal=False
             )
 
-            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref, use_softmax=False)[batch_size//2:, :, :, :] #(B, H, Q, K)
+            cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref, use_softmax=True)[batch_size//2:, :, :, :] #(B, H, Q, K)
             self.cross_attn_rollout = rollout_cross_attention_map(cross_attn_weight, 
                                                                     head_fusion="mean",
                                                                     downsample=24,
                                                                     prev_rollout=self.cross_attn_rollout,
-                                                                    device="cuda",
+                                                                    device=cross_attn_weight.device,
                                                                     ).detach().cpu()
 
             if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
@@ -380,10 +380,10 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                     visualize_heatmap(heatmap, dirname=f"dino-{p}", step=self.t, save=True)
                     print(f"visualize heatmap from key patch {p}")
                 if(self.visualize_cross_attn_map2):
-                    v = 3
-                    p = 160
+                    v = 1
+                    p = 291
                     heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
-                    visualize_heatmap(heatmap, dirname=f"dino-{v}-{p}", step=self.t, save=False)
+                    visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/dino.png", dirname=f"dino-{v}-{p}", step=self.t, save=True)
                     print(f"visualize heatmap from query view {v} patch {p}")
                 self.t += 1
                 self.cross_attn_rollout=None

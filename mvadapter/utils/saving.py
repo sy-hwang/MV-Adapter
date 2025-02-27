@@ -179,10 +179,12 @@ def png_to_gif(input_folder, output_gif, duration=100, loop=0):
     images = [os.path.join(input_folder, f) for f in images]
 
     # 이미지 로드
-    frames = [resize_keep_aspect(Image.open(img).convert("P", palette=Image.ADAPTIVE), 48) for img in images]
+    frames = [resize_keep_aspect(Image.open(img).convert("P", palette=Image.ADAPTIVE), 192) for img in images]
     
     # GIF 저장
     if frames:
+        black_frame = Image.new("P", frames[0].size, 0)
+        frames.insert(0, black_frame)
         frames[0].save(output_gif, save_all=True, append_images=frames[1:], duration=duration, loop=loop, optimize=True)
         print(f"gif 저장 완료: {output_gif}, filesize:{os.path.getsize(output_gif)/1024:.2f}KB")
 
