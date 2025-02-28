@@ -171,7 +171,7 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         ref_scale: float = 1.0,
         cache_hidden_states: Optional[List[torch.FloatTensor]] = None,
         use_mv: bool = True,
-        use_ref: bool = True,
+        use_ref: bool = False,
         num_views: Optional[int] = None,
         *args,
         **kwargs,
@@ -189,8 +189,8 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             deprecate("scale", "1.0.0", deprecation_message)
 
         self.visualize_cross_attn_map1 = False
-        self.visualize_cross_attn_map2 = False
-        self.visualize_self_attn_map = True
+        self.visualize_cross_attn_map2 = use_ref
+        self.visualize_self_attn_map = use_mv
 
         if num_views is not None:
             self.num_views = num_views
@@ -381,28 +381,6 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                                                                     device=cross_attn_weight.device,
                                                                     ).detach().cpu()
 
-            if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
-                if(self.visualize_cross_attn_map1):
-                    p = 179
-                    heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
-                    visualize_heatmap(heatmap, dirname=f"dino-{p}", step=self.t, save=True)
-                    print(f"visualize heatmap from key patch {p}")
-                if(self.visualize_cross_attn_map2):
-                    v = 1
-                    p = 291
-                    heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
-                    visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/dino.png", dirname=f"dino-{v}-{p}", step=self.t, save=True)
-                    print(f"visualize heatmap from query view {v} patch {p}")
-                if(self.visualize_self_attn_map):
-                    v = 3
-                    c = 10
-                    heatmap = get_heatmap_from_query_column(self.self_attn_rollout, selected_view=v, selected_column=c)
-                    visualize_heatmap(heatmap, dirname=f"dino-self-{v}-{c}", step=self.t, save=True)
-                self.t += 1
-                self.cross_attn_rollout=None
-                self.self_attn_rollout=None
-#########################################################################################################################################################################
-
             hidden_states_ref = hidden_states_ref.transpose(1, 2).reshape(
                 batch_size, -1, attn.heads * head_dim
             )
@@ -412,6 +390,27 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             hidden_states_ref = self.to_out_ref[0](hidden_states_ref)
             # dropout
             hidden_states_ref = self.to_out_ref[1](hidden_states_ref)
+
+        if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
+            if(use_ref and self.visualize_cross_attn_map1):
+                p = 179
+                heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
+                visualize_heatmap(heatmap, dirname=f"dino-{p}", step=self.t, save=False)
+                print(f"visualize heatmap from key patch {p}")
+            if(use_ref and self.visualize_cross_attn_map2):
+                v = 1
+                p = 291
+                heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
+                visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/sideview.png", dirname=f"dino-{v}-{p}", step=self.t, save=False)
+                print(f"visualize heatmap from query view {v} patch {p}")
+            if(use_mv and self.visualize_self_attn_map):
+                v = 0
+                c = 10
+                heatmap = get_heatmap_from_query_column(self.self_attn_rollout, selected_view=v, selected_column=c)
+                visualize_heatmap(heatmap, dirname=f"dino-self-{v}-{c}", step=self.t, save=False, need_display=False)
+            self.t += 1
+            self.cross_attn_rollout=None
+            self.self_attn_rollout=None
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
