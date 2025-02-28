@@ -543,8 +543,32 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
             self.scheduler, num_inference_steps, device, timesteps
         )
 
+        # Preprocess reference image
+        reference_image = self.image_processor.preprocess(reference_image)
+        reference_latents = self.prepare_image_latents(
+            reference_image,
+            timesteps[:1].repeat(batch_size * num_images_per_prompt),  # no use
+            batch_size,
+            1,
+            prompt_embeds.dtype,
+            device,
+            generator,
+            add_noise=False,
+        )
+        print(f"ref_latnets without noise: {reference_latents.shape}")
+
+
+        noise = torch.randn_like(reference_latents, device = device)
+        T = 1
+        reference_latents = reference_latents.to(device)
+        alpha_bar_t = self.scheduler.alphas_cumprod[torch.tensor(T-1, device=device)].to(device).view(-1, 1, 1, 1)
+        ref_T = (alpha_bar_t.sqrt() * reference_latents) + ((1-alpha_bar_t).sqrt() * noise)
+        print(f"ref_T shape: {ref_T.shape}")
+
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
+        if(latents is None):
+            latents = ref_T[0].unsqueeze(0).repeat(batch_size * num_images_per_prompt, 1, 1, 1).to(prompt_embeds.dtype)
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
@@ -555,6 +579,7 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
             generator,
             latents,
         )
+
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -605,19 +630,6 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
                 batch_size * num_images_per_prompt,
                 self.do_classifier_free_guidance,
             )
-
-        # Preprocess reference image
-        reference_image = self.image_processor.preprocess(reference_image)
-        reference_latents = self.prepare_image_latents(
-            reference_image,
-            timesteps[:1].repeat(batch_size * num_images_per_prompt),  # no use
-            batch_size,
-            1,
-            prompt_embeds.dtype,
-            device,
-            generator,
-            add_noise=False,
-        )
 
         with torch.no_grad():
             ref_timesteps = torch.zeros_like(timesteps[0])
