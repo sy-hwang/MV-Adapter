@@ -557,9 +557,8 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
         )
         print(f"ref_latnets without noise: {reference_latents.shape}")
 
-
-        noise = torch.randn_like(reference_latents, device = device)
-        T = 1
+        noise = torch.randn(reference_latents.shape, device = device, generator=generator)
+        T = 1000
         reference_latents = reference_latents.to(device)
         alpha_bar_t = self.scheduler.alphas_cumprod[torch.tensor(T-1, device=device)].to(device).view(-1, 1, 1, 1)
         ref_T = (alpha_bar_t.sqrt() * reference_latents) + ((1-alpha_bar_t).sqrt() * noise)
@@ -568,7 +567,10 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
         if(latents is None):
-            latents = ref_T[0].unsqueeze(0).repeat(batch_size * num_images_per_prompt, 1, 1, 1).to(prompt_embeds.dtype)
+            shape = (batch_size*num_images_per_prompt, *ref_T.shape[1:])
+            latents = torch.randn(shape, device=device, dtype=prompt_embeds.dtype)
+            latents[3] = latents[0] = ref_T[0].unsqueeze(0)
+            #latents = ref_T[0].unsqueeze(0).repeat(batch_size * num_images_per_prompt, 1, 1, 1).to(prompt_embeds.dtype)
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,

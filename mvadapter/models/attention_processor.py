@@ -171,7 +171,7 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         ref_scale: float = 1.0,
         cache_hidden_states: Optional[List[torch.FloatTensor]] = None,
         use_mv: bool = True,
-        use_ref: bool = False,
+        use_ref: bool = True,
         num_views: Optional[int] = None,
         *args,
         **kwargs,
@@ -401,7 +401,7 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 v = 1
                 p = 291
                 heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
-                visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/sideview.png", dirname=f"dino-{v}-{p}", step=self.t, save=False)
+                visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/dino.png", dirname=f"dino-{v}-{p}", step=self.t, save=False)
                 print(f"visualize heatmap from query view {v} patch {p}")
             if(use_mv and self.visualize_self_attn_map):
                 v = 0
