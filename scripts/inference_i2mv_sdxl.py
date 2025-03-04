@@ -130,6 +130,7 @@ def run_pipeline(
     lora_scale=1.0,
     device="cuda",
     azimuth_deg=None,
+    callback=None,
 ):
     # Prepare cameras
     if azimuth_deg is None:
@@ -177,7 +178,7 @@ def run_pipeline(
         negative_prompt=negative_prompt,
         cross_attention_kwargs={"scale": lora_scale},
         **pipe_kwargs,
-        # callback_on_step_end=my_custom_callback,
+        callback_on_step_end=callback,
         # callback_on_step_end_tensor_inputs=["latents"],
     ).images
 
