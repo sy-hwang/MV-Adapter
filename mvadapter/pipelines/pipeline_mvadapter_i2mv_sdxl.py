@@ -569,7 +569,7 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
         if(latents is None):
             shape = (batch_size*num_images_per_prompt, *ref_T.shape[1:])
             latents = torch.randn(shape, device=device, dtype=prompt_embeds.dtype)
-            latents[3] = latents[0] = ref_T[0].unsqueeze(0)
+            #latents[3] = latents[0] = ref_T[0].unsqueeze(0)
             #latents = ref_T[0].unsqueeze(0).repeat(batch_size * num_images_per_prompt, 1, 1, 1).to(prompt_embeds.dtype)
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,

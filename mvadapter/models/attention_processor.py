@@ -189,8 +189,8 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             deprecate("scale", "1.0.0", deprecation_message)
 
         self.visualize_cross_attn_map1 = False
-        self.visualize_cross_attn_map2 = use_ref
-        self.visualize_self_attn_map = use_mv
+        self.visualize_cross_attn_map2 = False
+        self.visualize_self_attn_map = True
 
         if num_views is not None:
             self.num_views = num_views
@@ -392,22 +392,23 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             hidden_states_ref = self.to_out_ref[1](hidden_states_ref)
 
         if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
+            filename="backview"
             if(use_ref and self.visualize_cross_attn_map1):
                 p = 179
                 heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
-                visualize_heatmap(heatmap, dirname=f"dino-{p}", step=self.t, save=False)
+                visualize_heatmap(heatmap, dirname=f"{filename}-{p}", step=self.t, save=False)
                 print(f"visualize heatmap from key patch {p}")
             if(use_ref and self.visualize_cross_attn_map2):
                 v = 1
                 p = 291
                 heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
-                visualize_heatmap(heatmap, ref_image_path="assets/demo/i2mv/dino.png", dirname=f"dino-{v}-{p}", step=self.t, save=False)
+                visualize_heatmap(heatmap, ref_image_path=f"assets/demo/i2mv/{filename}.png", dirname=f"{filename}-{v}-{p}", step=self.t, save=False)
                 print(f"visualize heatmap from query view {v} patch {p}")
             if(use_mv and self.visualize_self_attn_map):
-                v = 0
-                c = 10
+                v = 3
+                c = 11
                 heatmap = get_heatmap_from_query_column(self.self_attn_rollout, selected_view=v, selected_column=c)
-                visualize_heatmap(heatmap, dirname=f"dino-self-{v}-{c}", step=self.t, save=False, need_display=False)
+                visualize_heatmap(heatmap, dirname=f"{filename}-self-{v}-{c}", step=self.t, save=True, need_display=True)
             self.t += 1
             self.cross_attn_rollout=None
             self.self_attn_rollout=None
