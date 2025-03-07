@@ -7,7 +7,7 @@ from PIL import Image
 
 import os
 import IPython.display as display
-
+import cv2
 
 def tensor_to_image(
     data: Union[Image.Image, torch.Tensor, np.ndarray],
@@ -240,3 +240,39 @@ def mask_to_gif(input_folder, output_gif, ref_img, duration=100, loop=0):
         display.display(display.Image(output_gif))
     else:
         print("PNG 파일을 찾을 수 없습니다.")
+
+
+def get_heatmap(attention_map, ref_image_path=None, minmaxscale=True):
+    """
+    Args:
+        attention_map (Tensor): (B, W, H) 형태의 attention map (값 범위 [0,1])
+    """
+    if attention_map.ndim == 2:
+        attention_map = attention_map[np.newaxis, :, :]  # (W, H) → (1, W, H)
+    B, W, H = attention_map.shape  # 배치 크기 유지
+
+    # NaN 및 Inf 값 처리
+    attention_map = np.nan_to_num(attention_map, nan=0.0, posinf=1.0, neginf=0.0)
+
+    if(minmaxscale):
+        mask_min = np.min(attention_map, axis=(1, 2), keepdims=True)
+        mask_max = np.max(attention_map, axis=(1, 2), keepdims=True)
+        attention_map = np.where(mask_max == mask_min, attention_map, (attention_map - mask_min) / (mask_max - mask_min))
+
+    # uint8 변환 후 컬러맵 적용 (BGR로 생성됨)
+    heatmap = [cv2.applyColorMap(np.uint8(m * 255), cv2.COLORMAP_JET) for m in attention_map]
+
+    # 해상도 증가 (8배 확대) 및 uint8 변환 유지
+    heatmap = [cv2.resize(hm, (H * 8, W * 8), interpolation=cv2.INTER_CUBIC) for hm in heatmap]
+
+    # 배치 차원 유지 → 가로로 병합 (W*8, H*B*8)
+    heatmap = np.hstack(heatmap)  # (W*8, H*B*8, 3)
+
+    if ref_image_path is not None:
+        ref_image = cv2.imread(ref_image_path)
+        ref_image = cv2.resize(ref_image, (heatmap.shape[1], heatmap.shape[0]), interpolation=cv2.INTER_CUBIC)
+        heatmap = np.float32(heatmap)*0.5 + np.float32(ref_image)*0.5
+        heatmap = np.uint8(heatmap / np.max(heatmap)*255)
+    
+    return Image.fromarray(cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB))
+    

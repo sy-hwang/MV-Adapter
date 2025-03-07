@@ -68,29 +68,6 @@ def downsample_self_attention(tensor, target_feature_dim=24):
     Q = target_feature_dim*target_feature_dim
     
     return tensor.view(B, Q, K)
-
-def upsample_attention_map(tensor, target_dim=48):
-    """
-    upsample the attention map
-    Args:
-        tensor (Tensor): (B, Q, K)
-        target_feature_dim (int): target feature dimension
-    """
-    B, Q, K = tensor.shape
-    W = int(K**0.5)
-    tensor = tensor.view(B, Q, W, W)
-    tensor = F.interpolate(tensor.float().detach(), size = (target_dim, target_dim), mode='bicubic')
-    tensor = tensor.view(B, Q, target_dim*target_dim)
-    return tensor
-
-
-def downsample_patch(tensor, target_patch):
-    original_shape = tensor.shape[:-2]
-    tensor = tensor.view(-1, 1, *tensor.shape[-2:]) # (..., W, H) -> (-1, 1, W, H)
-    
-    tensor = F.interpolate(tensor, size=(target_patch, target_patch), mode='bilinear', align_corners=False)
-    return tensor.view(*original_shape, target_patch, target_patch)
-
     
 def get_attention_weight(q, k, v, dropout_p=0.0, is_causal=False, use_softmax=True):
     """
@@ -148,22 +125,6 @@ def fuse_heads(attention_map, head_fusion="mean"):
     else:
         raise ValueError(f"Unsupported head fusion method: {head_fusion}")
 
-
-def rollout(prev_rollout, attention_map):
-    """
-    Args:
-        prev_rollout (Tensor): 이전 rollout된 어텐션 맵 (Batch, Q, K)
-        attention_map (Tensor): 현재 어텐션 맵 (Batch, Q, K)
-    """
-    B,Q, K = attention_map.shape
-    identity = torch.eye(K, device=attention_map.device, dtype=attention_map.dtype).expand_as(attention_map)
-
-    if prev_rollout is None:
-        print("this should be first block")
-        return attention_map
-    else:
-        return torch.matmul(attention_map+identity, prev_rollout)
-
 def sum_up_attention_map(prev_rollout, attention_map):
     """
     Args:
@@ -176,43 +137,28 @@ def sum_up_attention_map(prev_rollout, attention_map):
         return attention_map + prev_rollout
 
 
-def rollout_cross_attention_map(attention_weight, device, head_fusion="mean", downsample=24, prev_rollout=None ):
+def compute_cross_attention_weight(attention_weight, device, head_fusion="mean", downsample=24, prev_weight=None ):
     """
     rolling out the image cross attention map, with pure cross-attention weight.
     Batch개의 Attention map을 반환
     """
     B, H, Q, K = attention_weight.shape
-    prev_rollout = prev_rollout.to(device) if prev_rollout is not None else None
+    prev_weight = prev_weight.to(device) if prev_weight is not None else None
     attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K) = (B, W*W, W*W)
     attention_weight = downsample_cross_attention(attention_weight, downsample) # (B, 576, 576)
-    return sum_up_attention_map(prev_rollout, attention_weight)
-    #return rollout(prev_rollout, attention_weight)
+    return sum_up_attention_map(prev_weight, attention_weight)
 
-def rollout_self_attention_map(attention_weight, device, head_fusion="mean", downsample=24, prev_rollout=None):
+def compute_self_attention_weight(attention_weight, device, head_fusion="mean", downsample=24, prev_weight=None):
     """
     rolling out the row wise self attention map
     """
     B, H, Q, K = attention_weight.shape # B H (ih iw) (nv iw)
-    prev_rollout = prev_rollout.to(device) if prev_rollout is not None else None
+    prev_weight = prev_weight.to(device) if prev_weight is not None else None
     attention_weight = fuse_heads(attention_weight, head_fusion) # (B, Q, K) = (B, h*w, B*w)
     attention_weight = downsample_self_attention(attention_weight, downsample) # (B, 24*24, B*24)
-    return sum_up_attention_map(prev_rollout, attention_weight)
+    return sum_up_attention_map(prev_weight, attention_weight)
 
-
-def get_heatmap_from_key_patch(attention_weight, selected_patch=0):
-    """
-    Args:
-        attention_weight (Tensor): (B, Q, K)
-        selected_patch (int): patch index of key(reference) image
-    output:
-        heatmap (Tensor): (B, Q) B of heatmaps for selected patch from reference image 
-    """
-    B, Q, K = attention_weight.shape
-    heatmaps = attention_weight[:, :, selected_patch] # (B, Q) NEED TO CHECK. Whether to visualize Q or K
-    heatmaps = rearrange(heatmaps, 'b (w h) -> b w h', w=int(Q**0.5), h=int(Q**0.5)) #(B, Q) -> (B, W, H)
-    return heatmaps # (B, W, H)
-
-def get_heatpmap_from_query_patch(attention_weight, selected_view=0, selected_patch=0):
+def extract_attention_map_from_query_patch(attention_weight, selected_view=0, selected_patch=0):
     """
     Args:
         attention_weight (Tensor): (B, Q, K)
@@ -226,7 +172,7 @@ def get_heatpmap_from_query_patch(attention_weight, selected_view=0, selected_pa
     heatmap = rearrange(heatmap, '(w h) -> w h', w=int(K**0.5), h=int(K**0.5)) #(K) -> (W, H)
     return heatmap # (W, H)
 
-def get_heatmap_from_query_column(attention_weight, selected_view, selected_column):
+def extract_attention_map_from_query_column(attention_weight, selected_view, selected_column):
     """
     Args:
         attention_weight (Tensor): (B, Q, K) = (B, 24*24, B*24)
@@ -241,48 +187,3 @@ def get_heatmap_from_query_column(attention_weight, selected_view, selected_colu
     heatmap = attention_weight[selected_view, :, selected_column, :, :]
     heatmap = rearrange(heatmap, 'h b w -> b h w')
     return heatmap
-
-def visualize_heatmap(mask, dirname="mask", ref_image_path=None, step=0,  save=False, need_display=True, minmaxscale=True):
-    """
-    Args:
-        mask (Tensor): (B, W, H) 형태의 attention mask (값 범위 [0,1])
-    """
-    #mask = mask.detach().cpu().numpy()  # GPU → CPU 변환
-    if mask.ndim == 2:
-        mask = mask[np.newaxis, :, :]  # (W, H) → (1, W, H)
-    B, W, H = mask.shape  # 배치 크기 유지
-
-    # NaN 및 Inf 값 처리
-    mask = np.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
-
-    if(minmaxscale):
-        mask_min = np.min(mask, axis=(1, 2), keepdims=True)
-        mask_max = np.max(mask, axis=(1, 2), keepdims=True)
-        mask = np.where(mask_max == mask_min, mask, (mask - mask_min) / (mask_max - mask_min))
-
-    # uint8 변환 후 컬러맵 적용 (BGR로 생성됨)
-    heatmap = [cv2.applyColorMap(np.uint8(m * 255), cv2.COLORMAP_JET) for m in mask]
-
-    # 해상도 증가 (8배 확대) 및 uint8 변환 유지
-    heatmap = [cv2.resize(hm, (H * 8, W * 8), interpolation=cv2.INTER_CUBIC) for hm in heatmap]
-
-    # 배치 차원 유지 → 가로로 병합 (W*8, H*B*8)
-    heatmap = np.hstack(heatmap)  # (W*8, H*B*8, 3)
-
-    if ref_image_path is not None:
-        ref_image = cv2.imread(ref_image_path)
-        ref_image = cv2.resize(ref_image, (H * 8, W * 8), interpolation=cv2.INTER_CUBIC)
-        heatmap = np.float32(heatmap)*0.8 + np.float32(ref_image)*0.2
-        heatmap = np.uint8(heatmap / np.max(heatmap)*255)
-
-    # PNG로 저장하는 이미지와 display에서 보여주는 이미지가 동일하게 설정
-    if save:
-        save_dir = f"attn_maps/{dirname}/"
-        os.makedirs(save_dir, exist_ok=True)
-        cv2.imwrite(f"{save_dir}{step:02d}.png", heatmap)
-
-    if need_display:
-        clear_output(wait=True)
-        img_pil = Image.fromarray(cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB))  # OpenCV BGR → RGB 변환
-        display(img_pil)  # 바로 표시
-    

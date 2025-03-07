@@ -11,12 +11,8 @@ from einops import rearrange
 from torch import nn
 from mvadapter.models.attention_util import (
     get_attention_weight, 
-    rollout_cross_attention_map, 
-    get_heatmap_from_key_patch, 
-    visualize_heatmap, 
-    get_heatpmap_from_query_patch, 
-    rollout_self_attention_map,
-    get_heatmap_from_query_column
+    compute_cross_attention_weight,
+    compute_self_attention_weight,
     )
 import matplotlib.pyplot as plt
 import numpy as np
@@ -121,9 +117,12 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         self.name = name  # NOTE: need for image cross-attention
         self.use_mv = use_mv
         self.use_ref = use_ref
-        self.t = 0
-        self.cross_attn_rollout = None
-        self.self_attn_rollout = None
+        self.step = 0
+        self.cross_attn_weight = None
+        self.self_attn_weight = None
+
+        self.cross_attn_weights = []
+        self.self_attn_weights = []
 
         if self.use_mv:
             self.to_q_mv = nn.Linear(
@@ -187,10 +186,6 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)
-
-        self.visualize_cross_attn_map1 = False
-        self.visualize_cross_attn_map2 = False
-        self.visualize_self_attn_map = True
 
         if num_views is not None:
             self.num_views = num_views
@@ -348,10 +343,10 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
                 ih=height,
             )
             self_attn_weight = self_attn_weight[batch_size//2:, :, :, :] #  (b nv) h (ih iw) (nv iw)
-            self.self_attn_rollout = rollout_self_attention_map(self_attn_weight,
+            self.self_attn_weight = compute_self_attention_weight(self_attn_weight,
                                                                 head_fusion="mean",
                                                                 downsample=24,
-                                                                prev_rollout=self.self_attn_rollout,
+                                                                prev_weight=self.self_attn_weight,
                                                                 device=self_attn_weight.device,
                                                                 ).detach().cpu()
 
@@ -374,10 +369,10 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             )
 
             cross_attn_weight = get_attention_weight(query_ref, key_ref, value_ref, use_softmax=True)[batch_size//2:, :, :, :] 
-            self.cross_attn_rollout = rollout_cross_attention_map(cross_attn_weight, 
+            self.cross_attn_weight = compute_cross_attention_weight(cross_attn_weight, 
                                                                     head_fusion="mean",
                                                                     downsample=24,
-                                                                    prev_rollout=self.cross_attn_rollout,
+                                                                    prev_weight=self.cross_attn_weight,
                                                                     device=cross_attn_weight.device,
                                                                     ).detach().cpu()
 
@@ -392,26 +387,24 @@ class DecoupledMVRowSelfAttnProcessor2_0(torch.nn.Module):
             hidden_states_ref = self.to_out_ref[1](hidden_states_ref)
 
         if(self.name == "up_blocks.1.attentions.2.transformer_blocks.1.attn1.processor"):
-            filename="backview"
-            if(use_ref and self.visualize_cross_attn_map1):
-                p = 179
-                heatmap = get_heatmap_from_key_patch(self.cross_attn_rollout, selected_patch=p)
-                visualize_heatmap(heatmap, dirname=f"{filename}-{p}", step=self.t, save=False)
-                print(f"visualize heatmap from key patch {p}")
-            if(use_ref and self.visualize_cross_attn_map2):
-                v = 1
-                p = 291
-                heatmap = get_heatpmap_from_query_patch(self.cross_attn_rollout, selected_view=v, selected_patch=p)
-                visualize_heatmap(heatmap, ref_image_path=f"assets/demo/i2mv/{filename}.png", dirname=f"{filename}-{v}-{p}", step=self.t, save=False)
-                print(f"visualize heatmap from query view {v} patch {p}")
-            if(use_mv and self.visualize_self_attn_map):
-                v = 3
-                c = 11
-                heatmap = get_heatmap_from_query_column(self.self_attn_rollout, selected_view=v, selected_column=c)
-                visualize_heatmap(heatmap, dirname=f"{filename}-self-{v}-{c}", step=self.t, save=True, need_display=True)
-            self.t += 1
-            self.cross_attn_rollout=None
-            self.self_attn_rollout=None
+            filename="dino"
+            if(use_mv):
+                self.self_attn_weights.append(self.self_attn_weight)
+                if(self.step == 50):
+                    self_attn_tensor = torch.stack(self.self_attn_weights, dim=0)
+                    torch.save(self_attn_tensor, f"output/{filename}/self_attention.pt")
+                    print("self_attn_weights saved")
+
+            if(use_ref):
+                self.cross_attn_weights.append(self.cross_attn_weight)
+                if(self.step == 50):
+                    cross_attn_tensor = torch.stack(self.cross_attn_weights, dim=0)
+                    torch.save(cross_attn_tensor, f"output/{filename}/cross_attention.pt")
+                    print("cross_attn_weights saved")
+            
+            self.step += 1            
+            self.cross_attn_weight=None
+            self.self_attn_weight=None            
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)

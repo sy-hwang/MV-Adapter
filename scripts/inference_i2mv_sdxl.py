@@ -244,10 +244,10 @@ if __name__ == "__main__":
     # Device
     parser.add_argument("--device", type=str, default="cuda")
     # Inference
-    parser.add_argument("--num_views", type=int, default=6)  # used
-    # parser.add_argument(
-    #     "--azimuth_deg", type=int, nargs="+", default=[0, 45, 90, 180, 270, 315]
-    # ) #Not used
+    parser.add_argument("--num_views", type=int, default=6)  # Not used
+    parser.add_argument(
+         "--azimuth_deg", type=int, nargs="+", default=[0, 45, 90, 180, 270, 315]
+     )
     parser.add_argument("--image", type=str, required=True)
     parser.add_argument("--text", type=str, default="high quality")
     parser.add_argument("--num_inference_steps", type=int, default=50)
@@ -263,11 +263,12 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default="output.png")
     # Extra
     parser.add_argument("--remove_bg", action="store_true", help="Remove background")
+    parser.add_argument("--filename", type=str, default="dino")
     args = parser.parse_args()
 
-    #num_views = len(args.azimuth_deg)
-    num_views = args.num_views
-    azimuth_deg= [i*(360/num_views) for i in range(num_views)]
+    num_views = len(args.azimuth_deg)
+    #num_views = args.num_views
+    #azimuth_deg= [i*(360/num_views) for i in range(num_views)]
 
     pipe = prepare_pipeline(
         base_model=args.base_model,
@@ -296,7 +297,8 @@ if __name__ == "__main__":
         remove_bg_fn = lambda x: remove_bg(x, birefnet, transform_image, args.device)
     else:
         remove_bg_fn = None
-
+    
+    os.makedirs(f"output/{args.filename}", exist_ok=True)
     images, reference_image = run_pipeline(
         pipe,
         num_views=num_views,
@@ -312,7 +314,7 @@ if __name__ == "__main__":
         negative_prompt=args.negative_prompt,
         device=args.device,
         remove_bg_fn=remove_bg_fn,
-        azimuth_deg=azimuth_deg,
+        azimuth_deg=args.azimuth_deg,
     )
-    make_image_grid(images, rows=1).save(args.output)
-    reference_image.save(args.output.rsplit(".", 1)[0] + "_reference.png")
+    make_image_grid(images, rows=1).save(f"output/{args.filename}/mvimages.png")
+    reference_image.save(f"output/{args.filename}/reference.png")
