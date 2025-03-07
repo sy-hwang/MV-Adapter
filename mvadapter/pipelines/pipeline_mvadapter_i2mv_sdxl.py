@@ -764,6 +764,26 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
                     return_dict=False,
                 )[0]
 
+                # compute x0
+                alphas = self.scheduler.alphas_cumprod.to(device)
+                sqrt_one_minus_alphas = (1 - alphas).sqrt()
+                t_index = t.long()
+                a_t = alphas[t_index].view(-1, 1, 1, 1)
+                sqrt_one_minus_at = sqrt_one_minus_alphas[t_index].view(-1, 1, 1, 1)
+
+                if self.do_classifier_free_guidance:
+                    latent_uncond, latent_cond = latent_model_input.chunk(2)
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                    predicted_x0_uncond = (latent_uncond - sqrt_one_minus_at * noise_pred_uncond) / a_t.sqrt()
+                    predicted_x0_cond = (latent_cond - sqrt_one_minus_at * noise_pred_text) / a_t.sqrt()
+
+                    predicted_x0 = predicted_x0_uncond + self.guidance_scale * (predicted_x0_cond - predicted_x0_uncond)
+                else:
+                    # Classifier-Free Guidance 사용하지 않는 경우
+                    predicted_x0 = (latent_model_input - sqrt_one_minus_at * noise_pred) / a_t.sqrt()
+
+
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -793,6 +813,7 @@ class MVAdapterI2MVSDXLPipeline(StableDiffusionXLPipeline, CustomAdapterMixin):
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
                         callback_kwargs[k] = locals()[k]
+                    callback_kwargs["pred_x0"] = predicted_x0
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
 
                     latents = callback_outputs.pop("latents", latents)

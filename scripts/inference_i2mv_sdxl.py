@@ -15,7 +15,7 @@ from mvadapter.utils import (
     get_plucker_embeds_from_cameras_ortho,
     make_image_grid,
 )
-
+import imageio
 
 def prepare_pipeline(
     base_model,
@@ -187,8 +187,6 @@ def run_pipeline(
 import os
 def my_custom_callback(pipeline, step, timestep, callback_kwargs):
     """매 타임스텝마다 실행되는 사용자 정의 callback 함수"""
-    print(f"Step {step}: Timestep {timestep}")
-
     latent = callback_kwargs.get("latents", None)
     if latent is None:
         return callback_kwargs
@@ -202,6 +200,7 @@ def my_custom_callback(pipeline, step, timestep, callback_kwargs):
     def save_image_tensor(latents, path):
         latents = latents / pipeline.vae.config.scaling_factor
         with torch.no_grad():
+            latents = latents.to(pipeline.vae.dtype)
             image_tensors = pipeline.vae.decode(latents.to(pipeline.device)).sample  # [B, C, H, W]
         images = []
         for img in image_tensors:
@@ -220,10 +219,28 @@ def my_custom_callback(pipeline, step, timestep, callback_kwargs):
             img_path = os.path.join(path, f"{step}.png")
             images[0].save(img_path)
     
-    SAVE_DIR = "out_0"
+    filename="dino"
+    xt_path = f"output/{filename}/xt"
+    x0_path = f"output/{filename}/x0"
+    save_image_tensor(latent, xt_path)
+    save_image_tensor(pred_x0, x0_path)
 
-    save_image_tensor(latent, f"{SAVE_DIR}_xt")
-    save_image_tensor(pred_x0, f"{SAVE_DIR}_x0")
+    if step == 49:
+        def create_gif(image_folder, gif_name):
+            """폴더 내 모든 이미지들을 사용하여 GIF 생성"""
+            images = []
+            file_list = sorted(os.listdir(image_folder), key=lambda x: int(x.split('.')[0]))  # 숫자 순 정렬
+            for file in file_list:
+                if file.endswith(".png"):
+                    img_path = os.path.join(image_folder, file)
+                    images.append(imageio.imread(img_path))  # 이미지 불러오기
+
+            gif_path = os.path.join(f"output/{filename}", f"{gif_name}.gif")
+            imageio.mimsave(gif_path, images, duration=0.01, loop=0)  # 0.1초 간격으로 GIF 저장
+            print(f"GIF 저장 완료: {gif_path}")
+
+        create_gif(xt_path, "xt_progress")  # xt 이미지들로 GIF 생성
+        create_gif(x0_path, "x0_progress")  # x0 이미지들로 GIF 생성
 
     return callback_kwargs
 
@@ -315,6 +332,7 @@ if __name__ == "__main__":
         device=args.device,
         remove_bg_fn=remove_bg_fn,
         azimuth_deg=args.azimuth_deg,
+        callback=my_custom_callback,   
     )
     make_image_grid(images, rows=1).save(f"output/{args.filename}/mvimages.png")
     reference_image.save(f"output/{args.filename}/reference.png")
